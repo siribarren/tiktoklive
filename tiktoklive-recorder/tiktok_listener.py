@@ -295,10 +295,91 @@ class TikTokCommentRecorder:
         if self.session_end_callback is not None:
             self.session_end_callback()
 
+    @staticmethod
+    def _coerce_mapping(value: object) -> Dict[str, object]:
+        if isinstance(value, dict):
+            return value
+
+        to_pydict = getattr(value, "to_pydict", None)
+        if callable(to_pydict):
+            try:
+                raw = to_pydict()
+                if isinstance(raw, dict):
+                    return raw
+            except TypeError:
+                # Some betterproto versions expose a narrower signature.
+                pass
+            except Exception:
+                return {}
+
+        return {}
+
+    @classmethod
+    def _find_first_value(cls, value: object, keys: tuple[str, ...]) -> Optional[str]:
+        if isinstance(value, dict):
+            for key in keys:
+                current = value.get(key)
+                if current not in (None, "", "None"):
+                    return str(current).strip()
+
+            for nested in value.values():
+                match = cls._find_first_value(nested, keys)
+                if match:
+                    return match
+
+        if isinstance(value, list):
+            for item in value:
+                match = cls._find_first_value(item, keys)
+                if match:
+                    return match
+
+        return None
+
+    def _extract_author_fields(self, event: CommentEvent) -> tuple[str, str]:
+        # Avoid `event.user`: recent TikTokLive payloads can include `nickName`,
+        # which breaks the library's ExtendedUser constructor on some versions.
+        user_info = getattr(event, "user_info", None)
+        user_data = self._coerce_mapping(user_info)
+
+        if not user_data:
+            event_data = self._coerce_mapping(event)
+            nested_user = event_data.get("user_info")
+            if isinstance(nested_user, dict):
+                user_data = nested_user
+
+        author_unique_id = self._find_first_value(
+            user_data,
+            (
+                "unique_id",
+                "uniqueId",
+                "username",
+                "display_id",
+                "displayId",
+                "sec_uid",
+                "secUid",
+            ),
+        ) or "unknown"
+        author_nickname = self._find_first_value(
+            user_data,
+            (
+                "nickname",
+                "nick_name",
+                "nickName",
+                "display_name",
+                "displayName",
+            ),
+        ) or author_unique_id
+
+        if not author_unique_id or author_unique_id == "None":
+            author_unique_id = "unknown"
+        if not author_nickname or author_nickname == "None":
+            author_nickname = author_unique_id
+
+        return author_unique_id, author_nickname
+
     def build_record(self, event: CommentEvent) -> Dict[str, object]:
         timestamp = datetime.now().isoformat()
-        author_unique_id = getattr(event.user, "unique_id", "unknown")
-        author_nickname = getattr(event.user, "nickname", "") or author_unique_id
+        author_unique_id, author_nickname = self._extract_author_fields(event)
         classification = classify_comment(event.comment)
 
         return {

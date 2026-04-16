@@ -19,3 +19,17 @@ leads/
 token.json
 credentials.json
 targets.json
+node_modules/
+node_modules.partial-20260415-1250/
+dist/
+public/current_messages.json
+tiktoklive-recorder/.venv/
+tiktoklive-recorder/venv/
+tiktoklive-recorder/logs/
+tiktoklive-recorder/leads/
+tiktoklive-recorder/uploads/
+tiktoklive-recorder/__pycache__/
+tiktoklive-recorder/.env
+tiktoklive-recorder/credentials.json
+tiktoklive-recorder/token.json
+tiktoklive-recorder/targets.json
