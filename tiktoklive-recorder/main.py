@@ -10,6 +10,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Dict, List, Optional, Protocol
+from urllib.parse import urlparse
 
 from tiktok_listener import TikTokCommentRecorder
 
@@ -442,7 +443,23 @@ def load_targets() -> List[Dict[str, str]]:
 
 
 def normalize_unique_id(value: str) -> str:
-    return f"@{value.strip().lstrip('@')}"
+    raw_value = value.strip()
+    if not raw_value:
+        raise ValueError("Debes enviar unique_id.")
+
+    candidate = raw_value
+    if "tiktok.com" in raw_value.lower():
+        parsed_value = raw_value if "://" in raw_value else f"https://{raw_value}"
+        path_parts = [part for part in urlparse(parsed_value).path.split("/") if part]
+        profile_part = next((part for part in path_parts if part.startswith("@")), "")
+        if profile_part:
+            candidate = profile_part
+
+    unique_id = candidate.strip().rstrip("/").lstrip("@").split("/")[0].strip()
+    if not unique_id:
+        raise ValueError("Debes enviar un usuario de TikTok valido.")
+
+    return f"@{unique_id}"
 
 
 def save_targets(targets: List[Dict[str, str]]) -> None:
@@ -465,6 +482,7 @@ def run_target(
         unique_id=unique_id,
         output_paths_getter=rotator.get_current_paths,
         message_callback=None,
+        session_start_callback=None,
         session_end_callback=None,
     )
     def handle_record(record: Dict[str, object]) -> None:
@@ -477,6 +495,7 @@ def run_target(
         publisher.end_session(unique_id)
 
     recorder.message_callback = handle_record
+    recorder.session_start_callback = lambda session_id: publisher.start_session(unique_id, session_id)
     recorder.session_end_callback = handle_session_end
     try:
         recorder.run()

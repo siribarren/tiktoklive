@@ -233,15 +233,18 @@ class TikTokCommentRecorder:
         unique_id: str,
         output_paths_getter,
         message_callback: Optional[Callable[[Dict[str, object]], None]] = None,
+        session_start_callback: Optional[Callable[[str], None]] = None,
         session_end_callback: Optional[Callable[[], None]] = None,
     ):
         self.client = TikTokLiveClient(unique_id=unique_id)
         self.output_paths_getter = output_paths_getter
         self.message_callback = message_callback
+        self.session_start_callback = session_start_callback
         self.session_end_callback = session_end_callback
         self.session_id = uuid4().hex
         self.lead_store = LeadStore("leads", unique_id, self.session_id)
         self._session_closed = False
+        self._session_started = False
         self._session_closed_lock = threading.Lock()
         self._register_events()
 
@@ -249,6 +252,7 @@ class TikTokCommentRecorder:
         @self.client.on(ConnectEvent)
         async def on_connect(event: ConnectEvent):
             print(f"Conectado a @{event.unique_id} | session_id={self.session_id}")
+            self._start_session()
 
         @self.client.on(CommentEvent)
         async def on_comment(event: CommentEvent):
@@ -295,6 +299,14 @@ class TikTokCommentRecorder:
         if self.session_end_callback is not None:
             self.session_end_callback()
 
+    def _start_session(self) -> None:
+        with self._session_closed_lock:
+            if self._session_started:
+                return
+            self._session_started = True
+
+        if self.session_start_callback is not None:
+            self.session_start_callback(self.session_id)
     @staticmethod
     def _coerce_mapping(value: object) -> Dict[str, object]:
         if isinstance(value, dict):
