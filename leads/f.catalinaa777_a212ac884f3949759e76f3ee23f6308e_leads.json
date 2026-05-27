@@ -1,0 +1,28 @@
+{
+  "streamer_unique_id": "f.catalinaa777",
+  "session_id": "a212ac884f3949759e76f3ee23f6308e",
+  "updated_at": "2026-05-07T14:24:33.313408",
+  "leads": [
+    {
+      "author_unique_id": "kriishnaaa_24",
+      "latest_nickname": "🪐𝘒𝘳𝘪𝘴𝘩𝘯𝘢𝘢𝘢!🌌",
+      "first_seen_at": "2026-05-07T14:24:32.998181",
+      "last_seen_at": "2026-05-07T14:24:33.309473",
+      "message_count": 2,
+      "lead_score": 4,
+      "matched_categories": [
+        "plan_telefonia"
+      ],
+      "reasons": [
+        "plan_telefonia:plan"
+      ],
+      "sample_messages": [
+        "Hola, consulta cómo puedo hablar con un ejecutivo mediante WhatsApp para consultar boleta de plan?"
+      ],
+      "scored_message_keys": [
+        "hola consulta como puedo hablar con un ejecutivo mediante whatsapp para consultar boleta de plan"
+      ],
+      "status": "new"
+    }
+  ]
+}

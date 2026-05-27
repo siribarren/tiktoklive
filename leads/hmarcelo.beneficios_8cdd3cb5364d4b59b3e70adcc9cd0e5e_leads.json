@@ -1,0 +1,88 @@
+{
+  "streamer_unique_id": "hmarcelo.beneficios",
+  "session_id": "8cdd3cb5364d4b59b3e70adcc9cd0e5e",
+  "updated_at": "2026-04-28T18:01:51.196835",
+  "leads": [
+    {
+      "author_unique_id": "m_05007",
+      "latest_nickname": "مارتن",
+      "first_seen_at": "2026-04-28T17:59:57.322897",
+      "last_seen_at": "2026-04-28T18:00:16.834518",
+      "message_count": 5,
+      "lead_score": 14,
+      "matched_categories": [
+        "equipo_movil"
+      ],
+      "reasons": [
+        "intencion:valor",
+        "equipo_movil:samsung",
+        "intencion:cuanto sale"
+      ],
+      "sample_messages": [
+        "hola valor?",
+        "Samsung s25",
+        "hola el s25fe cuanto sale bro?"
+      ],
+      "status": "new"
+    },
+    {
+      "author_unique_id": "claudio.escob",
+      "latest_nickname": "Claudio",
+      "first_seen_at": "2026-04-28T17:59:57.332158",
+      "last_seen_at": "2026-04-28T18:01:08.173116",
+      "message_count": 3,
+      "lead_score": 12,
+      "matched_categories": [
+        "equipo_movil",
+        "plan_telefonia"
+      ],
+      "reasons": [
+        "intencion:cuanto sale",
+        "equipo_movil:equipo",
+        "plan_telefonia:plan"
+      ],
+      "sample_messages": [
+        "hola el s25fe cuanto sale bro?",
+        "esas 18 cuotas son del plan más el equipo?"
+      ],
+      "status": "new"
+    },
+    {
+      "author_unique_id": "contucciones_cyc",
+      "latest_nickname": "construcciones cyc🔥",
+      "first_seen_at": "2026-04-28T18:01:51.188793",
+      "last_seen_at": "2026-04-28T18:01:51.188793",
+      "message_count": 1,
+      "lead_score": 6,
+      "matched_categories": [
+        "plan_telefonia"
+      ],
+      "reasons": [
+        "plan_telefonia:plan",
+        "intencion:precio"
+      ],
+      "sample_messages": [
+        "puede esplicar el tema de precio inicial  y valor mensual eso es con plan"
+      ],
+      "status": "new"
+    },
+    {
+      "author_unique_id": "marianamansilla1",
+      "latest_nickname": "Mariana  Mansilla",
+      "first_seen_at": "2026-04-28T18:00:44.195439",
+      "last_seen_at": "2026-04-28T18:00:44.195439",
+      "message_count": 1,
+      "lead_score": 4,
+      "matched_categories": [
+        "equipo_movil"
+      ],
+      "reasons": [
+        "equipo_movil:iphone"
+      ],
+      "sample_messages": [
+        "iphone 16"
+      ],
+      "status": "new"
+    }
+  ]
+}

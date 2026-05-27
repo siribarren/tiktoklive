@@ -1,0 +1,28 @@
+{
+  "streamer_unique_id": "ejecutivawomfabi",
+  "session_id": "982450746aa4413497652449294109da",
+  "updated_at": "2026-05-07T13:21:01.597090",
+  "leads": [
+    {
+      "author_unique_id": "bernardosalamancasalama0",
+      "latest_nickname": "Bernardo Salamanca S",
+      "first_seen_at": "2026-05-07T13:21:01.296551",
+      "last_seen_at": "2026-05-07T13:21:01.593639",
+      "message_count": 2,
+      "lead_score": 4,
+      "matched_categories": [
+        "equipo_movil"
+      ],
+      "reasons": [
+        "equipo_movil:equipo"
+      ],
+      "sample_messages": [
+        "tienen equipos a la venta también"
+      ],
+      "scored_message_keys": [
+        "tienen equipos a la venta tambien"
+      ],
+      "status": "new"
+    }
+  ]
+}

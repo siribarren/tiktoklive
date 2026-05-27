@@ -1,0 +1,28 @@
+{
+  "streamer_unique_id": "ejecutivawomnejanai",
+  "session_id": "84a7283db79d4e8e826814994e4e9e16",
+  "updated_at": "2026-05-07T13:25:55.297757",
+  "leads": [
+    {
+      "author_unique_id": "alejandro.muena5",
+      "latest_nickname": "Alejandro Muena",
+      "first_seen_at": "2026-05-07T13:25:54.714110",
+      "last_seen_at": "2026-05-07T13:25:55.296005",
+      "message_count": 2,
+      "lead_score": 4,
+      "matched_categories": [
+        "plan_telefonia"
+      ],
+      "reasons": [
+        "plan_telefonia:plan"
+      ],
+      "sample_messages": [
+        "puedo contratar un plan con  el mismo número Entel que tengo"
+      ],
+      "scored_message_keys": [
+        "puedo contratar un plan con el mismo numero entel que tengo"
+      ],
+      "status": "new"
+    }
+  ]
+}

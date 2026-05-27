@@ -1,0 +1,28 @@
+{
+  "streamer_unique_id": "f.catalinaa777",
+  "session_id": "ab84e0fe26ed4a00876155f1b79356b4",
+  "updated_at": "2026-05-07T13:31:07.848330",
+  "leads": [
+    {
+      "author_unique_id": "juancarrasco7240",
+      "latest_nickname": "juan carrasco",
+      "first_seen_at": "2026-05-07T13:31:07.408446",
+      "last_seen_at": "2026-05-07T13:31:07.846276",
+      "message_count": 2,
+      "lead_score": 4,
+      "matched_categories": [
+        "equipo_movil"
+      ],
+      "reasons": [
+        "equipo_movil:telefono"
+      ],
+      "sample_messages": [
+        "telefono pie 0 tengo 2 lunes entel"
+      ],
+      "scored_message_keys": [
+        "telefono pie 0 tengo 2 lunes entel"
+      ],
+      "status": "new"
+    }
+  ]
+}

@@ -1,0 +1,62 @@
+{
+  "streamer_unique_id": "hmarcelo.beneficios",
+  "session_id": "3ace7b0c8c08404da4c6a2ef54a80949",
+  "updated_at": "2026-04-28T17:48:18.857349",
+  "leads": [
+    {
+      "author_unique_id": "juan_munozvaldes",
+      "latest_nickname": "Juan Muñoz Valdes",
+      "first_seen_at": "2026-04-28T17:45:19.111130",
+      "last_seen_at": "2026-04-28T17:45:19.437522",
+      "message_count": 2,
+      "lead_score": 8,
+      "matched_categories": [
+        "equipo_movil"
+      ],
+      "reasons": [
+        "equipo_movil:iphone"
+      ],
+      "sample_messages": [
+        "iPhone ??"
+      ],
+      "status": "new"
+    },
+    {
+      "author_unique_id": "markiitossj",
+      "latest_nickname": "markiitossj",
+      "first_seen_at": "2026-04-28T17:47:09.861641",
+      "last_seen_at": "2026-04-28T17:48:18.855048",
+      "message_count": 2,
+      "lead_score": 8,
+      "matched_categories": [
+        "equipo_movil"
+      ],
+      "reasons": [
+        "equipo_movil:iphone"
+      ],
+      "sample_messages": [
+        "iPhone 17 pro ?",
+        "Holaaa , tienes iPhone 17 pro ?"
+      ],
+      "status": "new"
+    },
+    {
+      "author_unique_id": "tazmania8493",
+      "latest_nickname": "TaZ-MaNia",
+      "first_seen_at": "2026-04-28T17:46:50.206684",
+      "last_seen_at": "2026-04-28T17:46:50.206684",
+      "message_count": 1,
+      "lead_score": 4,
+      "matched_categories": [
+        "equipo_movil"
+      ],
+      "reasons": [
+        "equipo_movil:equipo"
+      ],
+      "sample_messages": [
+        "evaluamos con equipo 987288733 WhatsApp"
+      ],
+      "status": "new"
+    }
+  ]
+}

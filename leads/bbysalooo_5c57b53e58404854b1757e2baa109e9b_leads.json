@@ -1,0 +1,96 @@
+{
+  "streamer_unique_id": "bbysalooo",
+  "session_id": "5c57b53e58404854b1757e2baa109e9b",
+  "updated_at": "2026-05-07T13:27:51.473925",
+  "leads": [
+    {
+      "author_unique_id": "ignaciofuentes166",
+      "latest_nickname": "Ignacio Fuentes",
+      "first_seen_at": "2026-05-07T13:22:34.996090",
+      "last_seen_at": "2026-05-07T13:22:35.266146",
+      "message_count": 2,
+      "lead_score": 8,
+      "matched_categories": [
+        "equipo_movil",
+        "portabilidad"
+      ],
+      "reasons": [
+        "equipo_movil:iphone",
+        "portabilidad:portabilidad"
+      ],
+      "sample_messages": [
+        "Tiene oferta portabilidad iPhone"
+      ],
+      "scored_message_keys": [
+        "tiene oferta portabilidad iphone"
+      ],
+      "status": "new"
+    },
+    {
+      "author_unique_id": "mkee3565",
+      "latest_nickname": "mkee",
+      "first_seen_at": "2026-05-07T13:27:51.469690",
+      "last_seen_at": "2026-05-07T13:27:51.469690",
+      "message_count": 1,
+      "lead_score": 8,
+      "matched_categories": [
+        "equipo_movil",
+        "portabilidad"
+      ],
+      "reasons": [
+        "equipo_movil:movil",
+        "portabilidad:portabilidad"
+      ],
+      "sample_messages": [
+        "que pides para portabilidad con móvil"
+      ],
+      "scored_message_keys": [
+        "que pides para portabilidad con movil"
+      ],
+      "status": "new"
+    },
+    {
+      "author_unique_id": "serghits.420",
+      "latest_nickname": "$eña $$",
+      "first_seen_at": "2026-05-07T13:25:16.521399",
+      "last_seen_at": "2026-05-07T13:25:16.521399",
+      "message_count": 1,
+      "lead_score": 6,
+      "matched_categories": [
+        "plan_telefonia"
+      ],
+      "reasons": [
+        "plan_telefonia:plan",
+        "intencion:quiero"
+      ],
+      "sample_messages": [
+        "quiero un plan ."
+      ],
+      "scored_message_keys": [
+        "quiero un plan"
+      ],
+      "status": "new"
+    },
+    {
+      "author_unique_id": "christianjavieres1",
+      "latest_nickname": "Christianojavier🚀🤪🤪🇨🇱",
+      "first_seen_at": "2026-05-07T13:23:09.289907",
+      "last_seen_at": "2026-05-07T13:23:09.289907",
+      "message_count": 1,
+      "lead_score": 4,
+      "matched_categories": [
+        "equipo_movil"
+      ],
+      "reasons": [
+        "equipo_movil:celular"
+      ],
+      "sample_messages": [
+        "te pregunto si puedo sacar un celular con un pie"
+      ],
+      "scored_message_keys": [
+        "te pregunto si puedo sacar un celular con un pie"
+      ],
+      "status": "new"
+    }
+  ]
+}
