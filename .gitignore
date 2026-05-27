@@ -9,3 +9,14 @@ __pycache__/
 .env
 .DS_Store
 *.log
+*.zip
+targets.json
+tiktoklive-recorder/targets.json
+tiktoklive-recorder/credentials.json
+tiktoklive-recorder/token.json
+tiktoklive-recorder/.env
+leads/
+logs/
+tiktoklive-recorder/leads/
+tiktoklive-recorder/logs/
+tiktoklive-recorder/uploads/
