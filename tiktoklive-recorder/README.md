@@ -1,11 +1,12 @@
 # TikTok Live Recorder
 
-Este directorio contiene el servicio recorder/collector del proyecto.
+Este directorio contiene solo el servicio recorder/collector (Python) del proyecto.
 
 ## Documentación
 
 - Arquitectura global: `../docs/architecture.md`
 - Detalle técnico del recorder: `docs/architecture.md`
+- Frontend web canónico: `../src`
 
 ## Ejecutar
 
