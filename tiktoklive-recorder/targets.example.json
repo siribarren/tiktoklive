@@ -1,0 +1,14 @@
+[
+  {
+    "unique_id": "cuenta_demo_1",
+    "active": true,
+    "client": "cliente-demo",
+    "campaign": "live-portabilidad"
+  },
+  {
+    "unique_id": "cuenta_demo_2",
+    "active": false,
+    "client": "cliente-demo",
+    "campaign": "live-equipos"
+  }
+]
