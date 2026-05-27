@@ -1,11 +1,17 @@
+# TikTok Live Recorder
 
-  # SaaS Dashboard Design
+Este directorio contiene el servicio recorder/collector del proyecto.
 
-  This is a code bundle for SaaS Dashboard Design. The original project is available at https://www.figma.com/design/pcFLAuDCagU5ho9c2j4Wiq/SaaS-Dashboard-Design.
+## Documentación
 
-  ## Running the code
+- Arquitectura global: `../docs/architecture.md`
+- Detalle técnico del recorder: `docs/architecture.md`
 
-  Run `npm i` to install the dependencies.
+## Ejecutar
 
-  Run `npm run dev` to start the development server.
-  
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python main.py
+```

@@ -1,11 +1,28 @@
+# TikTok Live Platform
 
-  # SaaS Dashboard Design
+Monorepo local con dos partes:
 
-  This is a code bundle for SaaS Dashboard Design. The original project is available at https://www.figma.com/design/pcFLAuDCagU5ho9c2j4Wiq/SaaS-Dashboard-Design.
+- `./` frontend dashboard (Vite + React)
+- `./tiktoklive-recorder` backend/collector para TikTok Live
 
-  ## Running the code
+## Estructura de documentación
 
-  Run `npm i` to install the dependencies.
+- Documentación general del proyecto: `docs/architecture.md`
+- Documentación específica del recorder: `tiktoklive-recorder/README.md`
 
-  Run `npm run dev` to start the development server.
-  
+## Ejecutar frontend
+
+```bash
+npm install
+npm run dev
+```
+
+## Ejecutar recorder
+
+```bash
+cd tiktoklive-recorder
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python main.py
+```
