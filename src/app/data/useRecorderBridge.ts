@@ -685,14 +685,8 @@ export function useRecorderBridge() {
           mappedData.runningTargets.length > 0
             ? mappedData.runningTargets
             : previous.runningTargets;
-        const resolvedOnlineTargets =
-          mappedData.onlineTargets.length > 0
-            ? mappedData.onlineTargets
-            : previous.onlineTargets;
-        const resolvedLiveStatuses =
-          Object.keys(mappedData.liveStatuses).length > 0
-            ? mappedData.liveStatuses
-            : previous.liveStatuses;
+        const resolvedOnlineTargets = mappedData.onlineTargets;
+        const resolvedLiveStatuses = mappedData.liveStatuses;
         const resolvedMonitoringSince =
           Object.keys(mappedData.monitoringSince).length > 0
             ? mappedData.monitoringSince
