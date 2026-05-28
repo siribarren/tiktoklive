@@ -546,33 +546,17 @@ function mapPayload(
         : account.viewers ?? 0,
   }));
   for (const account of accounts) {
-    if (!runningTargetSet.has(account.uniqueId)) {
-      continue;
-    }
-
-    const updatedAtMs = account.updatedAt?.getTime() ?? 0;
-    const hasOpenSession = account.endTime === null;
-    if (!hasOpenSession) {
-      continue;
-    }
-
     const currentStatus = liveStatuses[account.uniqueId];
-    const currentCheckedAtMs = currentStatus?.checkedAt?.getTime() ?? 0;
-    const hasFreshOnlineStatus =
-      currentStatus?.status === 'online' &&
-      currentCheckedAtMs > 0 &&
-      loadedAt.getTime() - currentCheckedAtMs <= LIVE_ACTIVITY_FALLBACK_MS;
-    if (hasFreshOnlineStatus) {
+    if (currentStatus) {
       continue;
     }
-
     liveStatuses[account.uniqueId] = {
-      isLive: true,
-      status: 'online',
+      isLive: false,
+      status: runningTargetSet.has(account.uniqueId) ? 'unknown' : 'offline',
       checkedAt: loadedAt,
-      liveStartedAt: currentStatus?.liveStartedAt ?? account.startTime,
-      playbackUrl: currentStatus?.playbackUrl ?? null,
-      error: currentStatus?.error ?? null,
+      liveStartedAt: null,
+      playbackUrl: null,
+      error: null,
     };
   }
   const onlineTargets = Object.entries(liveStatuses)
