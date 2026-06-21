@@ -6,86 +6,78 @@ function normalizeUniqueId(value) {
   return trimmed.startsWith('@') ? trimmed : `@${trimmed}`;
 }
 
-const WOM_USERS = [
-  '@ejecutivadewom',
-  '@janisvalentina77',
-  '@ejecutivawomfabi',
-  '@ejecutivawommari',
-  '@ejecutivawomcynthia',
-  '@tuejecutivadewom',
-  '@ejecutivawomnejanai',
-].map(normalizeUniqueId);
+function normalizeClientKey(value) {
+  const normalized = String(value ?? '').trim().toUpperCase();
+  if (normalized === 'WOM' || normalized === 'CLARO') {
+    return normalized;
+  }
+  if (normalized.includes('WOM')) {
+    return 'WOM';
+  }
+  if (normalized.includes('CLARO')) {
+    return 'CLARO';
+  }
+  return '';
+}
 
-const CLARO_USERS = [
-  '@claro_benficios',
-  '@ada_rengifo1012',
-  '@rafael_store_full_live',
-  '@florloto20',
-  '@paaalinnnaaa',
-  '@hmarcelo.beneficios',
-  '@anavaldees',
-  '@mercado.claro88',
-  '@bbysalooo',
-].map(normalizeUniqueId);
+const CLIENT_ACCOUNT_REGISTRY = new Map();
 
-const ACCOUNT_DISPLAY_NAMES = {
-  '@claro_benficios': 'Daniela Baeza',
-  '@ada_rengifo1012': 'Ada Rengifo',
-  '@rafael_store_full_live': 'Rafael Cayrun',
-  '@florloto20': 'Barbara Cruz',
-  '@paaalinnnaaa': 'Paulina Cataldo',
-  '@hmarcelo.beneficios': 'Marcelo Hueichaqueo',
-  '@anavaldees': 'Ana Valdes',
-  '@mercado.claro88': 'Alejandro mercado',
-  '@bbysalooo': 'Salome Bustos',
-  '@ejecutivawomcynthia': 'Cynthia Diaz',
-  '@ejecutivadewom': 'Paz Ibañez Catalan',
-  '@ejecutivawomfabi': 'Fabiola Corro Cortes',
-  '@janisvalentina77': 'Janis Gonzalez Alvarez',
-  '@ejecutivawomnejanai': 'Natalie Jaña Inostroza',
-  '@ejecutivawommari': 'Mariana Vega Muñoz',
-  '@tuejecutivadewom': 'Melanie Luna Moreno',
-};
+export function registerClientAccounts(accounts = []) {
+  CLIENT_ACCOUNT_REGISTRY.clear();
 
-const ACCOUNT_DISPLAY_NAME_ENTRIES = Object.entries(ACCOUNT_DISPLAY_NAMES).map(
-  ([account, displayName]) => [normalizeUniqueId(account), displayName]
-);
-const ACCOUNT_DISPLAY_NAME_MAP = new Map(ACCOUNT_DISPLAY_NAME_ENTRIES);
+  for (const account of accounts) {
+    const uniqueId = normalizeUniqueId(
+      account?.uniqueId ?? account?.accountUniqueId ?? account?.username ?? account?.id
+    );
+    if (!uniqueId) {
+      continue;
+    }
 
-export const CLIENT_USERS = {
-  WOM: WOM_USERS,
-  CLARO: CLARO_USERS,
-};
+    const campaign = normalizeClientKey(
+      account?.campaign ?? account?.client ?? account?.clientCode ?? account?.clientName
+    );
+    const displayName = String(account?.displayName ?? account?.nickname ?? '').trim() || null;
 
-const CLIENT_USER_SETS = {
-  WOM: new Set(WOM_USERS),
-  CLARO: new Set(CLARO_USERS),
-};
+    CLIENT_ACCOUNT_REGISTRY.set(uniqueId, {
+      campaign,
+      displayName,
+    });
+  }
+}
+
+export function clearClientAccounts() {
+  CLIENT_ACCOUNT_REGISTRY.clear();
+}
 
 export function getUsersForClient(client) {
-  return CLIENT_USERS[client] ?? [];
+  const normalizedClient = normalizeClientKey(client);
+  if (!normalizedClient) {
+    return [];
+  }
+
+  return Array.from(CLIENT_ACCOUNT_REGISTRY.entries())
+    .filter(([, entry]) => entry.campaign === normalizedClient)
+    .map(([uniqueId]) => uniqueId)
+    .sort((left, right) => left.localeCompare(right));
 }
 
 export function isAccountInClient(accountUniqueId, client) {
-  const normalized = normalizeUniqueId(accountUniqueId);
-  if (!normalized) {
+  const normalizedClient = normalizeClientKey(client);
+  const normalizedAccount = normalizeUniqueId(accountUniqueId);
+  if (!normalizedClient || !normalizedAccount) {
     return false;
   }
-  return CLIENT_USER_SETS[client]?.has(normalized) ?? false;
+
+  return CLIENT_ACCOUNT_REGISTRY.get(normalizedAccount)?.campaign === normalizedClient;
 }
 
 export function resolveClientByAccount(accountUniqueId) {
-  const normalized = normalizeUniqueId(accountUniqueId);
-  if (!normalized) {
+  const normalizedAccount = normalizeUniqueId(accountUniqueId);
+  if (!normalizedAccount) {
     return null;
   }
-  if (CLIENT_USER_SETS.WOM.has(normalized)) {
-    return 'WOM';
-  }
-  if (CLIENT_USER_SETS.CLARO.has(normalized)) {
-    return 'CLARO';
-  }
-  return null;
+
+  return CLIENT_ACCOUNT_REGISTRY.get(normalizedAccount)?.campaign ?? null;
 }
 
 export function normalizeClientAccount(value) {
@@ -93,9 +85,10 @@ export function normalizeClientAccount(value) {
 }
 
 export function getDefaultDisplayNameForAccount(accountUniqueId) {
-  const normalized = normalizeUniqueId(accountUniqueId);
-  if (!normalized) {
+  const normalizedAccount = normalizeUniqueId(accountUniqueId);
+  if (!normalizedAccount) {
     return null;
   }
-  return ACCOUNT_DISPLAY_NAME_MAP.get(normalized) ?? null;
+
+  return CLIENT_ACCOUNT_REGISTRY.get(normalizedAccount)?.displayName ?? null;
 }

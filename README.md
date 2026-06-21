@@ -10,6 +10,17 @@ Monorepo local con dos partes:
 - Documentación general del proyecto: `docs/architecture.md`
 - Documentación específica del recorder: `tiktoklive-recorder/README.md`
 
+## Arranque unificado
+
+```bash
+npm install
+docker compose up -d
+npm run dev:all
+```
+
+Eso levanta el frontend de Vite y el recorder de Python al mismo tiempo.
+El recorder requiere Python 3.10+ y, en este proyecto, `python3.11` es la opción recomendada.
+
 ## Ejecutar frontend
 
 ```bash
@@ -21,8 +32,32 @@ npm run dev
 
 ```bash
 cd tiktoklive-recorder
-python3 -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python main.py
+python3.11 main.py
+```
+
+## Base de datos local
+
+```bash
+docker compose up -d
+```
+
+La primera vez que levanta, Postgres carga automaticamente:
+
+- `database/schema.sql`
+- `database/seed.sql`
+
+Para revisar datos de ejemplo:
+
+```bash
+psql "postgresql://ember:ember@localhost:5432/ember" -f database/example-queries.sql
+```
+
+Para reiniciar la base desde cero:
+
+```bash
+docker compose down -v
+docker compose up -d
 ```

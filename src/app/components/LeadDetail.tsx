@@ -26,6 +26,7 @@ import { buildLeadVisualIdMap } from '@/lib/lead-visual-id';
 import { useParams, Link } from 'react-router';
 import { Calendar } from './ui/calendar';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useAuth } from '../auth/auth';
 
 const DERIVAR_STATE_OPTIONS = [
   'Tomar lead',
@@ -80,13 +81,6 @@ function normalizeUniqueId(value?: string): string {
   return trimmed.startsWith('@') ? trimmed : `@${trimmed}`;
 }
 
-function resolveProfileRole(): string {
-  if (typeof window === 'undefined') {
-    return 'analista';
-  }
-  return window.localStorage.getItem('ember:user-profile') || 'analista';
-}
-
 function formatDateInput(value: Date): string {
   const day = String(value.getDate()).padStart(2, '0');
   const month = String(value.getMonth() + 1).padStart(2, '0');
@@ -104,6 +98,7 @@ function normalizeMessageForDedup(value: string): string {
 
 export function LeadDetail() {
   const { id } = useParams();
+  const { user } = useAuth();
   const { allLeads, liveSessions } = useRecorderBridge();
   const leadId = id ?? '';
   const [showNotFound, setShowNotFound] = useState(false);
@@ -117,8 +112,7 @@ export function LeadDetail() {
   const [scheduledFollowUpByLead, setScheduledFollowUpByLead] = useState<
     Record<string, { date: string; time: string }>
   >({});
-  const userProfile = resolveProfileRole();
-  const isSupervisor = userProfile === 'supervisor';
+  const canManageLeads = user?.role === 'administrator';
   const lead = useMemo(
     () => allLeads.find((candidate) => candidate.id === leadId),
     [allLeads, leadId]
@@ -681,29 +675,35 @@ export function LeadDetail() {
                   Seguimiento programado: <span className="font-medium">{scheduledFollowUp.date} {scheduledFollowUp.time}</span>
                 </div>
               ) : null}
-              <Button
-                className="w-full justify-start gap-2"
-                variant="outline"
-                onClick={() => setIsScheduleOpen((current) => !current)}
-              >
-                <CalendarIcon className="w-4 h-4" />
-                Programar seguimiento
-              </Button>
-              <Button
-                className="w-full justify-start gap-2"
-                variant="outline"
-                disabled={!isSupervisor}
-                title={!isSupervisor ? 'Disponible solo para supervisor' : undefined}
-                onClick={() =>
-                  setEditableLeadIds((current) => ({
-                    ...current,
-                    [leadId]: true,
-                  }))
-                }
-              >
-                <Pencil className="w-4 h-4" />
-                Editar
-              </Button>
+              {canManageLeads ? (
+                <>
+                  <Button
+                    className="w-full justify-start gap-2"
+                    variant="outline"
+                    onClick={() => setIsScheduleOpen((current) => !current)}
+                  >
+                    <CalendarIcon className="w-4 h-4" />
+                    Programar seguimiento
+                  </Button>
+                  <Button
+                    className="w-full justify-start gap-2"
+                    variant="outline"
+                    onClick={() =>
+                      setEditableLeadIds((current) => ({
+                        ...current,
+                        [leadId]: true,
+                      }))
+                    }
+                  >
+                    <Pencil className="w-4 h-4" />
+                    Editar
+                  </Button>
+                </>
+              ) : (
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                  Perfil de solo lectura. Las acciones de seguimiento y edición quedan reservadas al administrador.
+                </div>
+              )}
               {isScheduleOpen ? (
                 <div className="space-y-3 rounded-lg border border-gray-200 bg-gray-50 p-3">
                   <Calendar

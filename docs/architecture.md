@@ -63,3 +63,8 @@
 - UI realtime desacoplada del archivo JSON.
 - Recuperación robusta ante reinicios.
 - Base lista para clasificación avanzada (LLM/embeddings) sin romper el flujo operacional.
+
+### Persistencia SQL
+- Esquema base de PostgreSQL: `database/schema.sql`
+- Incluye `clients`, `sources`, `accounts`, `account_sessions`, `messages`, `leads`, historiales de estados y `account_metrics`
+- Las vistas `v_account_metrics` y `v_client_metrics` ayudan a consumir los datos para reporting

@@ -22,6 +22,14 @@ export function resolveApiErrorMessage(
   payload: ApiLikePayload | null,
   fallbackMessage: string
 ): string {
+  if (response.status === 401) {
+    return 'Tu sesión expiró. Vuelve a iniciar sesión.';
+  }
+
+  if (response.status === 403) {
+    return 'No tienes permisos para realizar esta acción.';
+  }
+
   const explicitMessage = [payload?.error, payload?.message].find(
     (value): value is string => Boolean(value && value.trim())
   );

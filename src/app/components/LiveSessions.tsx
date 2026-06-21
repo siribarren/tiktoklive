@@ -5,15 +5,17 @@ import { Radio, Eye, MessageSquare, Users, Clock, Copy, Check, X } from 'lucide-
 import { useRecorderBridge } from '../data/useRecorderBridge';
 import { Link, useNavigate } from 'react-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { TikTokLivePreviewButton } from './TikTokLivePreviewButton';
+import { TikTokPhoneLiveModal } from './tiktok/tiktok-phone-live-modal';
 import { readJsonResponse, resolveApiErrorMessage } from '../../lib/http';
 import { resolveClientByAccount } from '../dashboard/client-users.mjs';
+import { authFetch, useAuth } from '../auth/auth';
 
 const normalizeUniqueId = (value: string) => {
   const trimmed = value.trim();
   if (!trimmed) return '';
   return trimmed.startsWith('@') ? trimmed.toLowerCase() : `@${trimmed.toLowerCase()}`;
 };
+const DASHBOARD_CLIENT_STORAGE_KEY = 'ember:dashboard:selected-client';
 const LIVE_STATUS_FRESHNESS_MS = 90 * 1000;
 const DELETED_ACCOUNTS_STORAGE_KEY = 'ember:deleted-accounts';
 const START_MONITORING_PROGRESS_STAGES = [
@@ -30,6 +32,16 @@ const START_MONITORING_ERROR_VISIBLE_MS = 3_000;
 const STOP_MONITORING_PROGRESS_TOTAL_MS = 3_000;
 const STOP_MONITORING_DONE_VISIBLE_MS = 1_000;
 type SessionClientFilter = 'WOM' | 'CLARO';
+type LivePreviewAccount = {
+  username: string;
+  displayName: string;
+  isLive: boolean;
+  playbackUrl: string | null;
+  viewerCount: number;
+  leadCount: number;
+  messageCount: number;
+  streamStartedAt: Date | null;
+};
 const SESSION_CLIENT_LOGO_ASSETS: Record<
   SessionClientFilter,
   { primary: string; fallback?: string }
@@ -114,6 +126,8 @@ const formatSessionDuration = (start?: Date, end?: Date) => {
 
 export function LiveSessions() {
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const isAdminUser = user?.role === 'administrator';
   const {
     liveSessions: sessions,
     accountLabel,
@@ -127,8 +141,23 @@ export function LiveSessions() {
   const [isSubmitting, setIsSubmitting] = useState<string | null>(null);
   const [submitAction, setSubmitAction] = useState<'start' | 'stop' | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
-  const [selectedClientFilter, setSelectedClientFilter] = useState<SessionClientFilter>('WOM');
+  const [selectedClientFilter, setSelectedClientFilter] = useState<SessionClientFilter>(() => {
+    const fallbackClient: SessionClientFilter = user?.clientCode === 'CLARO' ? 'CLARO' : 'WOM';
+    if (!isAdminUser || typeof window === 'undefined') {
+      return fallbackClient;
+    }
+
+    const storedClient = window.localStorage.getItem(DASHBOARD_CLIENT_STORAGE_KEY);
+    if (storedClient === 'CLARO_PHOENIX') {
+      return 'CLARO';
+    }
+    if (storedClient === 'WOM' || storedClient === 'CLARO') {
+      return storedClient;
+    }
+    return fallbackClient;
+  });
   const [copiedSessionId, setCopiedSessionId] = useState<string | null>(null);
+  const [livePreviewAccount, setLivePreviewAccount] = useState<LivePreviewAccount | null>(null);
   const [startProgress, setStartProgress] = useState<{
     account: string;
     stageIndex: number;
@@ -144,6 +173,7 @@ export function LiveSessions() {
     progressPercent: number;
   } | null>(null);
   const stopProgressTimersRef = useRef<number[]>([]);
+  const canManageRecorder = isAdminUser;
   const [deletedAccounts, setDeletedAccounts] = useState<Set<string>>(() => {
     if (typeof window === 'undefined') {
       return new Set<string>();
@@ -194,6 +224,33 @@ export function LiveSessions() {
       window.removeEventListener('storage', syncDeletedAccounts);
     };
   }, []);
+  useEffect(() => {
+    if (!isAdminUser) {
+      setSelectedClientFilter(user?.clientCode === 'CLARO' ? 'CLARO' : 'WOM');
+      return;
+    }
+
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const syncSelectedClientFilter = () => {
+      const storedClient = window.localStorage.getItem(DASHBOARD_CLIENT_STORAGE_KEY);
+      if (storedClient === 'CLARO_PHOENIX') {
+        setSelectedClientFilter('CLARO');
+        return;
+      }
+      if (storedClient === 'WOM' || storedClient === 'CLARO') {
+        setSelectedClientFilter(storedClient);
+      }
+    };
+
+    syncSelectedClientFilter();
+    window.addEventListener('storage', syncSelectedClientFilter);
+    return () => {
+      window.removeEventListener('storage', syncSelectedClientFilter);
+    };
+  }, [isAdminUser, user?.clientCode]);
   const registeredAccountSet = useMemo(() => {
     const configuredTargetSet = new Set(configuredTargets.map((target) => normalizeUniqueId(target)));
     const runningTargetSet = new Set(runningTargets.map((target) => normalizeUniqueId(target)));
@@ -435,7 +492,7 @@ export function LiveSessions() {
     closeStopProgress();
     const progressPromise = beginStartProgress(normalized);
     try {
-      const response = await fetch('/recorder-api/targets', {
+      const response = await authFetch('/recorder-api/targets', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -487,7 +544,7 @@ export function LiveSessions() {
     setActionMessage(null);
     beginStopProgress(normalized);
     try {
-      let response = await fetch(`/recorder-api/targets?unique_id=${encodeURIComponent(normalized)}`, {
+      let response = await authFetch(`/recorder-api/targets?unique_id=${encodeURIComponent(normalized)}`, {
         method: 'DELETE',
         headers: {
           'Content-Type': 'application/json',
@@ -504,7 +561,7 @@ export function LiveSessions() {
 
       if (!response.ok || !payload?.ok) {
         // Fallback defensivo para entornos donde DELETE con body no se procesa bien.
-        response = await fetch('/recorder-api/targets', {
+        response = await authFetch('/recorder-api/targets', {
           method: 'DELETE',
           headers: {
             'Content-Type': 'application/json',
@@ -544,6 +601,21 @@ export function LiveSessions() {
     }
   };
 
+  const openLivePreview = (session: (typeof sessions)[number]) => {
+    const normalizedAccount = normalizeUniqueId(session.accountName);
+    const liveStatus = liveStatuses[normalizedAccount];
+    setLivePreviewAccount({
+      username: session.accountName,
+      displayName: session.accountName,
+      isLive: liveStatus?.status === 'online' || liveStatus?.isLive === true,
+      playbackUrl: liveStatus?.playbackUrl ?? null,
+      viewerCount: session.viewers,
+      leadCount: session.leadsDetected,
+      messageCount: session.messagesCount,
+      streamStartedAt: liveStatus?.liveStartedAt ?? session.startTime ?? null,
+    });
+  };
+
   return (
     <div className="p-6 space-y-6">
       {/* Header */}
@@ -554,14 +626,20 @@ export function LiveSessions() {
             <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">
               Cliente
             </label>
-            <select
-              value={selectedClientFilter}
-              onChange={(event) => setSelectedClientFilter(event.target.value as SessionClientFilter)}
-              className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900"
-            >
-              <option value="WOM">WOM</option>
-              <option value="CLARO">Claro</option>
-            </select>
+            {isAdminUser ? (
+              <select
+                value={selectedClientFilter}
+                onChange={(event) => setSelectedClientFilter(event.target.value as SessionClientFilter)}
+                className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900"
+              >
+                <option value="WOM">WOM</option>
+                <option value="CLARO">Claro</option>
+              </select>
+            ) : (
+              <div className="mt-1 flex h-9 w-full items-center rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900">
+                {selectedClientFilter}
+              </div>
+            )}
           </div>
         </div>
         <SessionClientLogoBadge client={selectedClientFilter} />
@@ -666,9 +744,10 @@ export function LiveSessions() {
         <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
           {clientFilteredLiveAccounts.map((session) => {
             const normalizedAccount = normalizeUniqueId(session.accountName);
+            const liveStatus = liveStatuses[normalizedAccount];
             const isMonitored = runningTargetSet.has(normalizedAccount);
             const isAccountLive = freshOnlineAccountSet.has(normalizedAccount);
-            const liveStartedAt = liveStatuses[normalizedAccount]?.liveStartedAt ?? session.startTime;
+            const liveStartedAt = liveStatus?.liveStartedAt ?? session.startTime;
             const liveStartedAtLabel = formatSessionTime(liveStartedAt);
             const monitoredSince = monitoringSince[normalizedAccount] ?? null;
             const monitoredSinceLabel = monitoredSince
@@ -746,53 +825,67 @@ export function LiveSessions() {
                         </div>
                       </div>
                       <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center sm:justify-end sm:self-start sm:shrink-0">
-                        <TikTokLivePreviewButton
-                          username={session.accountName}
-                          label="Ver Live"
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
                           className="h-7 min-w-[124px] justify-center px-2 text-[11px]"
-                          onFeedback={setActionMessage}
                           disabled={!canOpenLive}
-                          disabledReason={
+                          title={
                             !isMonitored
                               ? 'Primero debes iniciar el monitoreo de esta cuenta.'
                               : 'La cuenta debe estar ONLINE para abrir Ver Live.'
                           }
-                        />
-                        {isMonitored ? (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            className="h-7 min-w-[124px] justify-center px-2 text-[11px] text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700"
-                            onClick={() => {
-                              void stopMonitoring(session.accountName);
-                            }}
-                            disabled={isSubmitting !== null}
-                          >
-                            {isStopping ? (
-                              <>
-                                <LoadingSpinner className="w-3 h-3" />
-                                Deteniendo...
-                              </>
-                            ) : (
-                              'Detener monitoreo'
-                            )}
-                          </Button>
+                          onClick={() => {
+                            if (!canOpenLive) {
+                              return;
+                            }
+                            openLivePreview(session);
+                          }}
+                        >
+                          Ver Live
+                        </Button>
+                        {canManageRecorder ? (
+                          isMonitored ? (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-7 min-w-[124px] justify-center px-2 text-[11px] text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700"
+                              onClick={() => {
+                                void stopMonitoring(session.accountName);
+                              }}
+                              disabled={isSubmitting !== null}
+                            >
+                              {isStopping ? (
+                                <>
+                                  <LoadingSpinner className="w-3 h-3" />
+                                  Deteniendo...
+                                </>
+                              ) : (
+                                'Detener monitoreo'
+                              )}
+                            </Button>
+                          ) : (
+                            <Button
+                              size="sm"
+                              className="h-7 min-w-[124px] justify-center px-2 text-[11px] bg-blue-600 hover:bg-blue-700"
+                              disabled={isSubmitting !== null}
+                              onClick={() => startMonitoring(session.accountName)}
+                            >
+                              {isStarting ? (
+                                <>
+                                  <LoadingSpinner className="w-3 h-3" />
+                                  Iniciando...
+                                </>
+                              ) : (
+                                'Iniciar Monitoreo'
+                              )}
+                            </Button>
+                          )
                         ) : (
-                          <Button
-                            size="sm"
-                            className="h-7 min-w-[124px] justify-center px-2 text-[11px] bg-blue-600 hover:bg-blue-700"
-                            disabled={isSubmitting !== null}
-                            onClick={() => startMonitoring(session.accountName)}
-                          >
-                            {isStarting ? (
-                              <>
-                                <LoadingSpinner className="w-3 h-3" />
-                                Iniciando...
-                              </>
-                            ) : (
-                              'Iniciar Monitoreo'
-                            )}
-                          </Button>
+                          <span className="inline-flex min-h-7 items-center rounded-md border border-slate-200 bg-slate-50 px-3 text-[11px] text-slate-500">
+                            Vista solo lectura
+                          </span>
                         )}
                       </div>
                     </div>
@@ -909,6 +1002,22 @@ export function LiveSessions() {
           </p>
         ) : null}
       </div>
+      <TikTokPhoneLiveModal
+        username={livePreviewAccount?.username ?? ''}
+        displayName={livePreviewAccount?.displayName}
+        isLive={livePreviewAccount?.isLive}
+        playbackUrl={livePreviewAccount?.playbackUrl}
+        viewerCount={livePreviewAccount?.viewerCount}
+        leadCount={livePreviewAccount?.leadCount}
+        messageCount={livePreviewAccount?.messageCount}
+        streamStartedAt={livePreviewAccount?.streamStartedAt}
+        open={livePreviewAccount !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setLivePreviewAccount(null);
+          }
+        }}
+      />
     </div>
   );
 }

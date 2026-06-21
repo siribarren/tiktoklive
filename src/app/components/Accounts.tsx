@@ -10,14 +10,12 @@ import { AiReviewPanels } from './AiReviewPanels';
 import { TikTokPhoneLiveModal } from './tiktok/tiktok-phone-live-modal';
 import { MoreHorizontal, Play, X } from 'lucide-react';
 import { readJsonResponse, resolveApiErrorMessage } from '../../lib/http';
-import {
-  getDefaultDisplayNameForAccount,
-  getUsersForClient,
-  resolveClientByAccount,
-} from '../dashboard/client-users.mjs';
+import { resolveClientByAccount } from '../dashboard/client-users.mjs';
+import { authFetch, useAuth } from '../auth/auth';
 
 const DELETED_ACCOUNTS_STORAGE_KEY = 'ember:deleted-accounts';
 const ACCOUNT_OVERRIDES_STORAGE_KEY = 'ember:account-overrides';
+const IGNORED_MONITORING_STORAGE_KEY = 'ember:ignored-monitoring-accounts';
 const START_MONITORING_PROGRESS_STAGES = [
   'Validando la cuenta',
   'Conectando con TikTok',
@@ -29,10 +27,22 @@ const START_MONITORING_PROGRESS_STEP_MS =
   START_MONITORING_PROGRESS_TOTAL_MS / START_MONITORING_PROGRESS_STAGES.length;
 const STOP_MONITORING_PROGRESS_TOTAL_MS = 3_000;
 const STOP_MONITORING_DONE_VISIBLE_MS = 1_000;
+const ACCOUNT_TABLE_COLUMN_WIDTHS = [
+  '16%',
+  '16%',
+  '8%',
+  '8%',
+  '8%',
+  '6%',
+  '6%',
+  '6%',
+  '12%',
+  '14%',
+] as const;
 
 type AccountPriority = 'Alta' | 'Media' | 'Baja';
-type AccountCampaign = 'WOM' | 'CLARO' | 'SIN_ASIGNAR';
-type NewAccountCampaign = 'WOM' | 'CLARO';
+type AccountCampaign = 'WOM' | 'CLARO' | 'DEMO' | 'SIN_ASIGNAR';
+type NewAccountCampaign = 'WOM' | 'CLARO' | 'DEMO';
 
 interface AccountOverride {
   uniqueId: string;
@@ -130,21 +140,37 @@ const normalizePriority = (value?: string): AccountPriority => {
 };
 
 const normalizeCampaign = (value?: string): AccountCampaign => {
-  if (value === 'WOM' || value === 'CLARO') {
-    return value;
+  const normalizedValue = String(value ?? '').trim().toUpperCase();
+  if (!normalizedValue) {
+    return 'SIN_ASIGNAR';
+  }
+  if (normalizedValue.includes('WOM')) {
+    return 'WOM';
+  }
+  if (normalizedValue.includes('CLARO')) {
+    return 'CLARO';
+  }
+  if (normalizedValue.includes('DEMO')) {
+    return 'DEMO';
   }
   return 'SIN_ASIGNAR';
 };
 
 const normalizeOverrideCampaign = (value?: string, accountUniqueId?: string): NewAccountCampaign => {
-  if (value === 'WOM' || value === 'CLARO') {
-    return value;
+  const normalizedValue = normalizeCampaign(value);
+  if (normalizedValue !== 'SIN_ASIGNAR') {
+    return normalizedValue;
   }
-  const inferred = resolveClientByAccount(accountUniqueId);
-  if (inferred === 'WOM' || inferred === 'CLARO') {
+  const inferred = normalizeCampaign(resolveClientByAccount(accountUniqueId) ?? undefined);
+  if (inferred !== 'SIN_ASIGNAR') {
     return inferred;
   }
   return 'WOM';
+};
+
+const normalizeEditableCampaign = (value?: string): NewAccountCampaign => {
+  const normalizedValue = normalizeCampaign(value);
+  return normalizedValue === 'SIN_ASIGNAR' ? 'WOM' : normalizedValue;
 };
 
 const getCampaignLabel = (campaign: AccountCampaign) => {
@@ -153,6 +179,9 @@ const getCampaignLabel = (campaign: AccountCampaign) => {
   }
   if (campaign === 'WOM') {
     return 'WOM';
+  }
+  if (campaign === 'DEMO') {
+    return 'Demo';
   }
   return 'Sin asignar';
 };
@@ -163,6 +192,9 @@ const getCampaignBadgeClass = (campaign: AccountCampaign) => {
   }
   if (campaign === 'CLARO') {
     return 'bg-red-50 text-red-700 border-red-200';
+  }
+  if (campaign === 'DEMO') {
+    return 'bg-teal-50 text-teal-700 border-teal-200';
   }
   return 'bg-slate-50 text-slate-700 border-slate-200';
 };
@@ -187,13 +219,17 @@ function LoadingSpinner({ className = '' }: { className?: string }) {
 }
 
 export function Accounts() {
+  const { user } = useAuth();
   const { accounts, configuredTargets, runningTargets, onlineTargets, liveStatuses } = useRecorderBridge();
   const navigate = useNavigate();
   const [deletingAccount, setDeletingAccount] = useState<string | null>(null);
   const [monitoringActionFor, setMonitoringActionFor] = useState<string | null>(null);
+  const [monitoringActionType, setMonitoringActionType] = useState<'start' | 'stop' | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [newTarget, setNewTarget] = useState('');
   const [newTargetCampaign, setNewTargetCampaign] = useState<NewAccountCampaign | ''>('');
+  const [newTargetFirstName, setNewTargetFirstName] = useState('');
+  const [newTargetLastName, setNewTargetLastName] = useState('');
   const [openActionsFor, setOpenActionsFor] = useState<string | null>(null);
   const [editingSourceAccount, setEditingSourceAccount] = useState<string | null>(null);
   const [livePreviewAccount, setLivePreviewAccount] = useState<LivePreviewAccount | null>(null);
@@ -227,6 +263,38 @@ export function Accounts() {
 
     try {
       const rawValue = window.localStorage.getItem(DELETED_ACCOUNTS_STORAGE_KEY);
+      if (!rawValue) {
+        return new Set<string>();
+      }
+      const parsedValue = JSON.parse(rawValue) as string[];
+      return new Set(parsedValue.map((item) => normalizeUniqueId(item)).filter(Boolean));
+    } catch {
+      return new Set<string>();
+    }
+  });
+  const restoreDeletedAccount = (sourceUniqueId: string) => {
+    const normalizedSource = normalizeUniqueId(sourceUniqueId);
+    if (!normalizedSource) {
+      return;
+    }
+
+    setDeletedAccounts((previous) => {
+      if (!previous.has(normalizedSource)) {
+        return previous;
+      }
+
+      const next = new Set(previous);
+      next.delete(normalizedSource);
+      return next;
+    });
+  };
+  const [ignoredMonitoringAccounts, setIgnoredMonitoringAccounts] = useState<Set<string>>(() => {
+    if (typeof window === 'undefined') {
+      return new Set<string>();
+    }
+
+    try {
+      const rawValue = window.localStorage.getItem(IGNORED_MONITORING_STORAGE_KEY);
       if (!rawValue) {
         return new Set<string>();
       }
@@ -275,27 +343,45 @@ export function Accounts() {
     }
   });
 
-  const campaignAccountCatalog = useMemo(
-    () => [
-      ...getUsersForClient('CLARO').map((uniqueId) => ({
-        sourceUniqueId: normalizeUniqueId(uniqueId),
-        uniqueId: normalizeUniqueId(uniqueId),
-        campaign: 'CLARO' as const,
-        nickname:
-          getDefaultDisplayNameForAccount(uniqueId) ??
-          normalizeUniqueId(uniqueId).replace(/^@/, ''),
-      })),
-      ...getUsersForClient('WOM').map((uniqueId) => ({
-        sourceUniqueId: normalizeUniqueId(uniqueId),
-        uniqueId: normalizeUniqueId(uniqueId),
-        campaign: 'WOM' as const,
-        nickname:
-          getDefaultDisplayNameForAccount(uniqueId) ??
-          normalizeUniqueId(uniqueId).replace(/^@/, ''),
-      })),
-    ],
-    []
-  );
+  const campaignAccountCatalog = useMemo(() => {
+    const catalogBySource = new Map<
+      string,
+      {
+        sourceUniqueId: string;
+        uniqueId: string;
+        campaign: AccountCampaign;
+        nickname: string;
+      }
+    >();
+
+    accounts.forEach((account) => {
+      const sourceUniqueId = normalizeUniqueId(account.uniqueId);
+      if (!sourceUniqueId) {
+        return;
+      }
+
+      const primaryCampaign = normalizeCampaign(account.campaign ?? '');
+      const resolvedCampaign =
+        primaryCampaign !== 'SIN_ASIGNAR'
+          ? primaryCampaign
+          : normalizeCampaign(account.clientName ?? '');
+      const resolvedUniqueId = normalizeUniqueId(account.uniqueId);
+      const resolvedNickname =
+        String(account.displayName ?? account.nickname ?? '').trim() ||
+        resolvedUniqueId.replace(/^@/, '');
+
+      catalogBySource.set(sourceUniqueId, {
+        sourceUniqueId,
+        uniqueId: resolvedUniqueId,
+        campaign: resolvedCampaign,
+        nickname: resolvedNickname,
+      });
+    });
+
+    return Array.from(catalogBySource.values()).sort((left, right) =>
+      left.sourceUniqueId.localeCompare(right.sourceUniqueId)
+    );
+  }, [accounts]);
   const campaignCatalogSourceSet = useMemo(
     () => new Set(campaignAccountCatalog.map((account) => account.sourceUniqueId)),
     [campaignAccountCatalog]
@@ -304,26 +390,6 @@ export function Accounts() {
     () => new Map(campaignAccountCatalog.map((account) => [account.sourceUniqueId, account.campaign])),
     [campaignAccountCatalog]
   );
-
-  useEffect(() => {
-    setDeletedAccounts((previous) => {
-      const next = new Set(
-        Array.from(previous).filter((sourceUniqueId) =>
-          campaignCatalogSourceSet.has(sourceUniqueId)
-        )
-      );
-      return next.size === previous.size ? previous : next;
-    });
-
-    setAccountOverrides((previous) => {
-      const nextEntries = Object.entries(previous).filter(([sourceUniqueId]) =>
-        campaignCatalogSourceSet.has(normalizeUniqueId(sourceUniqueId))
-      );
-      return nextEntries.length === Object.keys(previous).length
-        ? previous
-        : Object.fromEntries(nextEntries);
-    });
-  }, [campaignCatalogSourceSet]);
 
   const accountsWithOverrides = useMemo(() => {
     const baseByUniqueId = new Map<
@@ -358,10 +424,7 @@ export function Accounts() {
       const sourceUniqueId = catalogAccount.sourceUniqueId;
       const override = accountOverrides[sourceUniqueId];
       const resolvedUniqueId = normalizeUniqueId(override?.uniqueId) || catalogAccount.uniqueId;
-      const fallbackNickname =
-        catalogAccount.nickname ||
-        getDefaultDisplayNameForAccount(resolvedUniqueId) ||
-        resolvedUniqueId.replace(/^@/, '');
+      const fallbackNickname = catalogAccount.nickname || resolvedUniqueId.replace(/^@/, '');
       const baseAccount =
         baseByUniqueId.get(resolvedUniqueId) ||
         baseByUniqueId.get(sourceUniqueId) ||
@@ -403,6 +466,51 @@ export function Accounts() {
     () => new Set(onlineTargets.map((target) => normalizeUniqueIdKey(target)).filter(Boolean)),
     [onlineTargets]
   );
+  useEffect(() => {
+    setDeletedAccounts((previous) => {
+      const next = new Set(
+        Array.from(previous).filter((sourceUniqueId) =>
+          campaignCatalogSourceSet.has(sourceUniqueId)
+        )
+      );
+      return next.size === previous.size ? previous : next;
+    });
+
+    setAccountOverrides((previous) => {
+      const nextEntries = Object.entries(previous).filter(([sourceUniqueId, value]) => {
+        const normalizedSource = normalizeUniqueId(sourceUniqueId);
+        const normalizedSourceKey = normalizeUniqueIdKey(sourceUniqueId);
+        if (campaignCatalogSourceSet.has(normalizedSource)) {
+          return true;
+        }
+        if (
+          configuredTargetKeySet.has(normalizedSourceKey) ||
+          runningTargetKeySet.has(normalizedSourceKey) ||
+          onlineTargetKeySet.has(normalizedSourceKey)
+        ) {
+          return true;
+        }
+        return normalizeCampaign(value?.campaign) === 'DEMO';
+      });
+      return nextEntries.length === Object.keys(previous).length
+        ? previous
+        : Object.fromEntries(nextEntries);
+    });
+
+    setIgnoredMonitoringAccounts((previous) => {
+      const next = new Set(
+        Array.from(previous).filter((sourceUniqueId) =>
+          campaignCatalogSourceSet.has(sourceUniqueId)
+        )
+      );
+      return next.size === previous.size ? previous : next;
+    });
+  }, [
+    campaignCatalogSourceSet,
+    configuredTargetKeySet,
+    runningTargetKeySet,
+    onlineTargetKeySet,
+  ]);
   const liveStatusesByKey = useMemo(() => {
     const mapped = new Map<string, AccountLiveStatusValue>();
     for (const [uniqueId, status] of Object.entries(liveStatuses)) {
@@ -422,6 +530,15 @@ export function Accounts() {
   const monitoredTargetKeySet = useMemo(
     () => new Set(runningTargetKeySet),
     [runningTargetKeySet]
+  );
+  const ignoredMonitoringKeySet = useMemo(
+    () =>
+      new Set(
+        Array.from(ignoredMonitoringAccounts)
+          .map((account) => normalizeUniqueIdKey(account))
+          .filter(Boolean)
+      ),
+    [ignoredMonitoringAccounts]
   );
 
   const visibleAccounts = useMemo(
@@ -450,7 +567,9 @@ export function Accounts() {
       const liveStatusOnline = liveStatus?.status === 'online' || liveStatus?.isLive === true;
       const isOnline =
         liveStatusOnline || candidateKeys.some((key) => onlineTargetKeySet.has(key));
-      const isMonitored = candidateKeys.some((key) => monitoredTargetKeySet.has(key));
+      const isIgnored = candidateKeys.some((key) => ignoredMonitoringKeySet.has(key));
+      const isMonitored =
+        !isIgnored && candidateKeys.some((key) => monitoredTargetKeySet.has(key));
 
       mapped.set(normalizedSource, {
         isOnline,
@@ -465,6 +584,7 @@ export function Accounts() {
     liveStatusesByKey,
     onlineTargetKeySet,
     monitoredTargetKeySet,
+    ignoredMonitoringKeySet,
   ]);
   const prioritizedVisibleAccounts = useMemo(
     () =>
@@ -500,6 +620,7 @@ export function Accounts() {
     const grouped: Record<AccountCampaign, (typeof prioritizedVisibleAccounts)> = {
       WOM: [],
       CLARO: [],
+      DEMO: [],
       SIN_ASIGNAR: [],
     };
 
@@ -511,6 +632,7 @@ export function Accounts() {
     return [
       { key: 'WOM' as const, label: 'WOM', accounts: grouped.WOM },
       { key: 'CLARO' as const, label: 'Claro', accounts: grouped.CLARO },
+      { key: 'DEMO' as const, label: 'Demo', accounts: grouped.DEMO },
       { key: 'SIN_ASIGNAR' as const, label: 'Sin asignar', accounts: grouped.SIN_ASIGNAR },
     ].filter((group) => group.accounts.length > 0);
   }, [prioritizedVisibleAccounts]);
@@ -606,7 +728,7 @@ export function Accounts() {
   };
   const aiSummaryText = useMemo(() => {
     if (visibleAccounts.length === 0) {
-      return 'No hay cuentas disponibles para analizar. Al agregar o reactivar cuentas, este resumen mostrará automáticamente la performance general de los lives e interacciones.';
+      return 'No hay cuentas disponibles para analizar. Al monitorear o reactivar cuentas, este resumen mostrará automáticamente la performance general de los lives e interacciones.';
     }
 
     const totalAccounts = visibleAccounts.length;
@@ -622,6 +744,7 @@ export function Accounts() {
 
     return `Se analizaron ${totalAccounts} cuentas TikTok, con ${activeAccounts} activas y ${totalAccounts - activeAccounts} finalizadas. En conjunto se registraron ${totalMessages} mensajes, ${totalLeads} leads detectados y ${totalViewers} usuarios únicos acumulados. El promedio de audiencia por cuenta fue de ${averageViewersPerAccount} usuarios, con una conversión aproximada de ${leadConversionRate}% de mensajes a leads. La cuenta con mayor volumen de interacción fue ${topAccount.uniqueId}, destacando por su nivel de actividad durante los lives.`;
   }, [visibleAccounts]);
+  const canManageRecorder = user?.role === 'administrator';
 
   const aiRecommendations = useMemo(() => {
     if (visibleAccounts.length === 0) {
@@ -678,6 +801,17 @@ export function Accounts() {
   }, [accountOverrides]);
 
   useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    window.localStorage.setItem(
+      IGNORED_MONITORING_STORAGE_KEY,
+      JSON.stringify(Array.from(ignoredMonitoringAccounts))
+    );
+  }, [ignoredMonitoringAccounts]);
+
+  useEffect(() => {
     const handleMouseDown = (event: MouseEvent) => {
       const target = event.target as HTMLElement | null;
       if (!target?.closest('[data-account-actions-root="true"]')) {
@@ -727,7 +861,7 @@ export function Accounts() {
       uniqueId: account.uniqueId,
       nickname: account.nickname,
       priority: account.priority,
-      campaign: account.campaign === 'CLARO' ? 'CLARO' : 'WOM',
+      campaign: normalizeEditableCampaign(account.campaign),
     });
     setEditingSourceAccount(account.sourceUniqueId);
     setOpenActionsFor(null);
@@ -781,7 +915,7 @@ export function Accounts() {
     setDeletingAccount(normalizedSource);
     setActionMessage(null);
     try {
-      const response = await fetch('/recorder-api/targets', {
+      const response = await authFetch('/recorder-api/targets', {
         method: 'DELETE',
         headers: {
           'Content-Type': 'application/json',
@@ -825,16 +959,18 @@ export function Accounts() {
 
     const targetState = accountRealtimeState.get(normalizedSource);
     if (targetState?.isMonitored) {
-      setActionMessage(`${normalizedSource} ya está en monitoreo.`);
+      restoreDeletedAccount(normalizedSource);
+      setActionMessage(`${normalizedSource} ya está agregada.`);
       return true;
     }
 
     setMonitoringActionFor(normalizedSource);
+    setMonitoringActionType('start');
     setActionMessage(null);
     closeStopProgress();
     const progressPromise = beginStartProgress(normalizedSource);
     try {
-      const response = await fetch('/recorder-api/targets', {
+      const response = await authFetch('/recorder-api/targets', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -850,14 +986,24 @@ export function Accounts() {
       }>(response);
 
       if (!response.ok || !payload?.ok) {
-        throw new Error(resolveApiErrorMessage(response, payload, 'No se pudo iniciar el monitoreo.'));
+        throw new Error(resolveApiErrorMessage(response, payload, 'No se pudo agregar la cuenta.'));
       }
 
       const startedAccount = normalizeUniqueId(payload.unique_id || normalizedSource) || normalizedSource;
+      restoreDeletedAccount(startedAccount);
+      setIgnoredMonitoringAccounts((previous) => {
+        if (!previous.has(startedAccount) && !previous.has(normalizedSource)) {
+          return previous;
+        }
+        const next = new Set(previous);
+        next.delete(startedAccount);
+        next.delete(normalizedSource);
+        return next;
+      });
       setActionMessage(
         payload.started
-          ? `Monitoreo iniciado para ${startedAccount}.`
-          : `${startedAccount} ya estaba en monitoreo.`
+          ? `Cuenta ${startedAccount} agregada.`
+          : `${startedAccount} ya estaba agregada.`
       );
       await progressPromise;
       return true;
@@ -869,6 +1015,7 @@ export function Accounts() {
       return false;
     } finally {
       setMonitoringActionFor(null);
+      setMonitoringActionType(null);
     }
   };
   const stopMonitoring = async (
@@ -881,9 +1028,12 @@ export function Accounts() {
     }
 
     closeStartProgress();
+    setMonitoringActionFor(normalizedSource);
+    setMonitoringActionType('stop');
+    setIgnoredMonitoringAccounts((previous) => new Set(previous).add(normalizedSource));
     beginStopProgress(normalizedSource);
     try {
-      const response = await fetch('/recorder-api/targets', {
+      let response = await authFetch(`/recorder-api/targets?unique_id=${encodeURIComponent(normalizedSource)}`, {
         method: 'DELETE',
         headers: {
           'Content-Type': 'application/json',
@@ -891,24 +1041,41 @@ export function Accounts() {
         body: JSON.stringify({ unique_id: normalizedSource }),
       });
 
-      let payload: { ok?: boolean; error?: string } | null = null;
-      try {
-        payload = (await response.json()) as { ok?: boolean; error?: string };
-      } catch {
-        payload = null;
+      let payload = await readJsonResponse<{
+        ok?: boolean;
+        stopped?: boolean;
+        unique_id?: string;
+        error?: string;
+      }>(response);
+
+      if (!response.ok || !payload?.ok) {
+        response = await authFetch('/recorder-api/targets', {
+          method: 'DELETE',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ unique_id: normalizedSource }),
+        });
+        payload = await readJsonResponse<{
+          ok?: boolean;
+          stopped?: boolean;
+          unique_id?: string;
+          error?: string;
+        }>(response);
       }
 
       if (!response.ok || payload?.ok === false) {
-        throw new Error(payload?.error || 'No se pudo detener el monitoreo.');
+        throw new Error(resolveApiErrorMessage(response, payload, 'No se pudo detener el monitoreo.'));
       }
     } catch (error) {
-      closeStopProgress();
       const message =
         error instanceof Error ? error.message : 'No se pudo conectar con el monitor local.';
-      setActionMessage(message);
+      setActionMessage(`${normalizedSource} fue ignorada en esta vista. ${message}`);
     } finally {
+      setMonitoringActionFor(null);
+      setMonitoringActionType(null);
       if (options?.automatic !== true) {
-        setActionMessage(`Monitoreo detenido para ${normalizedSource}.`);
+        setActionMessage((current) => current ?? `Monitoreo detenido para ${normalizedSource}.`);
       }
     }
   };
@@ -922,34 +1089,41 @@ export function Accounts() {
     }
 
     if (!newTargetCampaign) {
-      setActionMessage('Selecciona el cliente de la cuenta (WOM o Claro).');
+      setActionMessage('Selecciona el cliente de la cuenta (WOM, Claro o Demo).');
       return;
     }
 
     const normalizedTarget = normalizeUniqueId(trimmedTarget);
     const catalogCampaign = campaignCatalogBySource.get(normalizedTarget);
-    if (!catalogCampaign) {
-      setActionMessage('La cuenta no pertenece al listado oficial de campañas.');
+    if (!catalogCampaign && newTargetCampaign !== 'DEMO') {
+      setActionMessage(
+        'La cuenta no pertenece al listado oficial de campañas. Si es una cuenta DEMO, selecciona Demo.'
+      );
       return;
     }
-    if (catalogCampaign !== newTargetCampaign) {
+    if (catalogCampaign && catalogCampaign !== newTargetCampaign) {
       setActionMessage(
         `La cuenta ${normalizedTarget} pertenece a ${getCampaignLabel(catalogCampaign)}. Ajusta el cliente.`
       );
       return;
     }
-    const fallbackNickname =
-      getDefaultDisplayNameForAccount(normalizedTarget) ??
-      normalizedTarget.replace(/^@/, '');
+    const trimmedFirstName = newTargetFirstName.trim();
+    const trimmedLastName = newTargetLastName.trim();
+    if (!trimmedFirstName || !trimmedLastName) {
+      setActionMessage('Ingresa Nombre y Apellido para agregar la cuenta.');
+      return;
+    }
+    const fallbackNickname = normalizedTarget.replace(/^@/, '');
+    const enteredNickname = [trimmedFirstName, trimmedLastName].join(' ');
     setAccountOverrides((previous) => {
       const current = previous[normalizedTarget];
       return {
         ...previous,
         [normalizedTarget]: {
           uniqueId: normalizedTarget,
-          nickname: current?.nickname?.trim() || fallbackNickname,
+          nickname: enteredNickname || current?.nickname?.trim() || fallbackNickname,
           priority: normalizePriority(current?.priority),
-          campaign: catalogCampaign,
+          campaign: newTargetCampaign,
         },
       };
     });
@@ -958,6 +1132,8 @@ export function Accounts() {
     if (started) {
       setNewTarget('');
       setNewTargetCampaign('');
+      setNewTargetFirstName('');
+      setNewTargetLastName('');
     }
   };
 
@@ -972,35 +1148,57 @@ export function Accounts() {
             Cuentas configuradas y sus métricas guardadas por sesión
           </p>
         </div>
-        <form
-          className="grid w-full max-w-2xl grid-cols-1 gap-2 rounded-lg border border-amber-200 bg-amber-50/70 p-2 md:grid-cols-[1.4fr_1fr_auto]"
-          onSubmit={handleStartMonitoringSubmit}
-        >
-          <Input
-            value={newTarget}
-            onChange={(event) => setNewTarget(event.target.value)}
-            placeholder="@usuario.tiktok"
-            className="bg-white"
-          />
-          <select
-            value={newTargetCampaign}
-            onChange={(event) => setNewTargetCampaign(event.target.value as NewAccountCampaign | '')}
-            className="h-9 rounded-md border border-gray-200 bg-white px-3 text-sm text-gray-900 outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-100"
-            required
+        {canManageRecorder ? (
+          <form
+            className="grid w-full max-w-4xl grid-cols-1 gap-2 rounded-lg border border-amber-200 bg-amber-50/70 p-2 md:grid-cols-[1.4fr_1fr_1fr_1fr_auto]"
+            onSubmit={handleStartMonitoringSubmit}
           >
-            <option value="">Cliente</option>
-            <option value="WOM">WOM</option>
-            <option value="CLARO">Claro</option>
-          </select>
-          <Button
-            type="submit"
-            className="gap-2 bg-amber-600 hover:bg-amber-700"
-            disabled={monitoringActionFor !== null}
-          >
-            <Play className="h-4 w-4" />
-            {monitoringActionFor ? 'Iniciando...' : 'Agregar'}
-          </Button>
-        </form>
+            <Input
+              value={newTarget}
+              onChange={(event) => setNewTarget(event.target.value)}
+              placeholder="@usuario.tiktok"
+              className="bg-white"
+              required
+            />
+            <Input
+              value={newTargetFirstName}
+              onChange={(event) => setNewTargetFirstName(event.target.value)}
+              placeholder="Nombre"
+              className="bg-white"
+              required
+            />
+            <Input
+              value={newTargetLastName}
+              onChange={(event) => setNewTargetLastName(event.target.value)}
+              placeholder="Apellido"
+              className="bg-white"
+              required
+            />
+            <select
+              value={newTargetCampaign}
+              onChange={(event) => setNewTargetCampaign(event.target.value as NewAccountCampaign | '')}
+              className="h-9 rounded-md border border-gray-200 bg-white px-3 text-sm text-gray-900 outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-100"
+              required
+            >
+              <option value="">Cliente</option>
+              <option value="WOM">WOM</option>
+              <option value="CLARO">Claro</option>
+              <option value="DEMO">Demo</option>
+            </select>
+            <Button
+              type="submit"
+              className="gap-2 bg-amber-600 hover:bg-amber-700"
+              disabled={monitoringActionFor !== null}
+            >
+              <Play className="h-4 w-4" />
+              {monitoringActionType === 'start' ? 'Agregando...' : 'Agregar'}
+            </Button>
+          </form>
+        ) : (
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+            Vista de solo lectura para tu perfil. El monitoreo y la edición quedan reservados al administrador.
+          </div>
+        )}
       </div>
       {startProgress ? (
         <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-3 text-emerald-700">
@@ -1012,7 +1210,7 @@ export function Accounts() {
                   {START_MONITORING_PROGRESS_STAGES[startProgress.stageIndex]}
                 </p>
                 <p className="text-xs opacity-90">
-                  Iniciando monitoreo para {startProgress.account}
+                  Agregando cuenta para {startProgress.account}
                 </p>
               </div>
             </div>
@@ -1089,7 +1287,12 @@ export function Accounts() {
                 </AccordionTrigger>
                 <AccordionContent>
                   <div className="overflow-x-auto">
-                    <table className="w-full text-[13px]">
+                    <table className="w-full min-w-[1200px] table-fixed text-[13px]">
+                      <colgroup>
+                        {ACCOUNT_TABLE_COLUMN_WIDTHS.map((width, index) => (
+                          <col key={`${group.key}-account-col-${index}`} style={{ width }} />
+                        ))}
+                      </colgroup>
                       <thead>
                         <tr className="border-b border-gray-200">
                           <th className="text-left py-2.5 px-3 text-[11px] font-medium text-gray-500 uppercase tracking-wider">
@@ -1131,13 +1334,17 @@ export function Accounts() {
                           const liveStatus = realtimeState?.liveStatus;
                           const isOnline = realtimeState?.isOnline === true;
                           const isMonitored = realtimeState?.isMonitored === true;
+                          const isMonitorActionPending = monitoringActionFor === normalizedSource;
                           const canOpenLive = isMonitored && isOnline;
+                          const isMonitorBlockedByOffline = !isOnline && !isMonitored;
                           const monitorButtonDisabled =
                             monitoringActionFor !== null ||
                             deletingAccount === normalizedSource ||
-                            isMonitored;
+                            isMonitorBlockedByOffline;
                           const monitorDisabledReason = isMonitored
-                            ? 'Esta cuenta ya está agregada.'
+                            ? 'Ignorar esta cuenta para dejar de monitorearla.'
+                            : isMonitorBlockedByOffline
+                            ? 'La cuenta debe estar Online para agregarla.'
                             : undefined;
                           return (
                             <tr
@@ -1216,35 +1423,15 @@ export function Accounts() {
                                   <Button
                                     type="button"
                                     size="sm"
-                                    className={`h-7 px-2 text-[11px] ${
-                                      isMonitored
-                                        ? 'bg-emerald-600 hover:bg-emerald-700'
-                                        : 'bg-blue-600 hover:bg-blue-700'
-                                    }`}
-                                    disabled={monitorButtonDisabled}
-                                    title={monitorDisabledReason}
-                                    onClick={() => {
-                                      void startMonitoring(account.sourceUniqueId);
-                                    }}
-                                  >
-                                    {monitoringActionFor === normalizedSource
-                                      ? 'Iniciando...'
-                                      : isMonitored
-                                      ? 'Agregado'
-                                      : 'Agregar'}
-                                  </Button>
-                                  <Button
-                                    type="button"
-                                    size="sm"
                                     className="h-7 px-2 bg-indigo-600 hover:bg-indigo-700 text-[11px]"
                                     disabled={!canOpenLive}
-                                    title={
-                                      !canOpenLive
-                                        ? !isMonitored
+                                      title={
+                                        !canOpenLive
+                                          ? !isMonitored
                                           ? 'Primero debes agregar esta cuenta.'
                                           : 'La cuenta debe estar Online para abrir Ver Live.'
                                         : undefined
-                                    }
+                                      }
                                     onClick={() => {
                                       if (!canOpenLive) {
                                         return;
@@ -1258,46 +1445,81 @@ export function Accounts() {
                                   >
                                     Ver Live
                                   </Button>
-                                  <div className="relative" data-account-actions-root="true">
-                                    <Button
-                                      type="button"
-                                      size="sm"
-                                      variant="outline"
-                                      className="h-7 w-7 p-0"
-                                      aria-label={`Acciones para ${account.uniqueId}`}
-                                      title="Acciones"
-                                      onClick={() => {
-                                        setOpenActionsFor((current) =>
-                                          current === normalizedSource ? null : normalizedSource
-                                        );
-                                      }}
-                                    >
-                                      <MoreHorizontal className="h-4 w-4" />
-                                    </Button>
-                                    {openActionsFor === normalizedSource ? (
-                                      <div className="absolute right-0 z-20 mt-1 w-28 rounded-md border border-gray-200 bg-white p-1 shadow-lg">
-                                        <button
+                                  {canManageRecorder ? (
+                                    <>
+                                      <Button
+                                        type="button"
+                                        size="sm"
+                                        className={`group h-7 min-w-24 px-2 text-[11px] transition-colors ${
+                                          isMonitored
+                                            ? 'bg-emerald-600 hover:bg-red-600'
+                                            : isMonitorBlockedByOffline
+                                            ? 'bg-gray-200 text-gray-500 hover:bg-gray-200'
+                                            : 'bg-blue-600 hover:bg-blue-700'
+                                        }`}
+                                        disabled={monitorButtonDisabled}
+                                        title={monitorDisabledReason}
+                                        onClick={() => {
+                                          if (isMonitored) {
+                                            void stopMonitoring(account.sourceUniqueId);
+                                            return;
+                                          }
+                                          void startMonitoring(account.sourceUniqueId);
+                                        }}
+                                      >
+                                        {isMonitorActionPending ? (
+                                          monitoringActionType === 'stop' ? 'Ignorando...' : 'Agregando...'
+                                        ) : isMonitored ? (
+                                          <>
+                                            <span className="group-hover:hidden">Monitoreado</span>
+                                            <span className="hidden group-hover:inline">Ignorar</span>
+                                          </>
+                                        ) : (
+                                          'Agregar'
+                                        )}
+                                      </Button>
+                                      <div className="relative" data-account-actions-root="true">
+                                        <Button
                                           type="button"
-                                          className="w-full rounded-sm px-2 py-1.5 text-left text-xs text-gray-700 hover:bg-gray-100"
+                                          size="sm"
+                                          variant="outline"
+                                          className="h-7 w-7 p-0"
+                                          aria-label={`Acciones para ${account.uniqueId}`}
+                                          title="Acciones"
                                           onClick={() => {
-                                            openEditAccount(account);
+                                            setOpenActionsFor((current) =>
+                                              current === normalizedSource ? null : normalizedSource
+                                            );
                                           }}
                                         >
-                                          Editar
-                                        </button>
-                                        <button
-                                          type="button"
-                                          className="w-full rounded-sm px-2 py-1.5 text-left text-xs text-red-600 hover:bg-red-50"
-                                          disabled={deletingAccount === normalizedSource}
-                                          onClick={() => {
-                                            void deleteAccount(account);
-                                          }}
-                                        >
-                                          Eliminar
-                                        </button>
+                                          <MoreHorizontal className="h-4 w-4" />
+                                        </Button>
+                                        {openActionsFor === normalizedSource ? (
+                                          <div className="absolute right-0 z-20 mt-1 w-28 rounded-md border border-gray-200 bg-white p-1 shadow-lg">
+                                            <button
+                                              type="button"
+                                              className="w-full rounded-sm px-2 py-1.5 text-left text-xs text-gray-700 hover:bg-gray-100"
+                                              onClick={() => {
+                                                openEditAccount(account);
+                                              }}
+                                            >
+                                              Editar
+                                            </button>
+                                            <button
+                                              type="button"
+                                              className="w-full rounded-sm px-2 py-1.5 text-left text-xs text-red-600 hover:bg-red-50"
+                                              disabled={deletingAccount === normalizedSource}
+                                              onClick={() => {
+                                                void deleteAccount(account);
+                                              }}
+                                            >
+                                              Eliminar
+                                            </button>
+                                          </div>
+                                        ) : null}
                                       </div>
-                                    ) : null}
-                                  </div>
+                                    </>
+                                  ) : null}
                                 </div>
                               </td>
                             </tr>
@@ -1405,6 +1627,7 @@ export function Accounts() {
                 >
                   <option value="WOM">WOM</option>
                   <option value="CLARO">Claro</option>
+                  <option value="DEMO">Demo</option>
                 </select>
               </div>
 

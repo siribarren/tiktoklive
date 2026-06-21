@@ -13,7 +13,7 @@
 ### CurrentMessagesPublisher
 - Vive en `tiktoklive-recorder/main.py`.
 - Agrega mensajes/leads/sesiones por cuenta.
-- Persiste `public/current_messages.json` para compatibilidad del bridge legado.
+- Persiste `public/current_messages.json` solo como compatibilidad legacy.
 
 ### EventBus
 - Vive en `tiktoklive-recorder/event_bus.py`.
@@ -34,6 +34,7 @@
 - Endpoints:
   - `GET /status`
   - `GET /live-status`
+  - `GET /db-snapshot`
   - `POST /targets`
   - `DELETE /targets`
   - `DELETE /sessions`
@@ -47,11 +48,11 @@
 - `src/app/data/useRecorderBridge.ts`.
 - Intenta WebSocket primero.
 - Si WS entrega snapshots, actualiza por eventos y corta polling.
-- Si WS falla o se cae, mantiene polling a `current_messages.json`.
+- Consulta `/recorder-api/db-snapshot` como fuente principal de datos.
 
 ### JSON fallback
-- `current_messages.json` se mantiene sin eliminar.
-- Garantiza continuidad si FastAPI/WS no está disponible.
+- `current_messages.json` se conserva solo por compatibilidad.
+- No es la fuente de verdad del frontend.
 
 ## Arquitectura objetivo
 

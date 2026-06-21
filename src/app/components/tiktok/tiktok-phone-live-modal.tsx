@@ -86,6 +86,8 @@ export function TikTokPhoneLiveModal({
 }: TikTokPhoneLiveModalProps) {
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
   const [playerError, setPlayerError] = useState<string | null>(null);
+  const [playerState, setPlayerState] = useState<'idle' | 'loading' | 'ready' | 'playing'>('idle');
+  const [needsManualPlay, setNeedsManualPlay] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
   const sanitizedUsername = sanitizeTikTokUsername(username);
@@ -122,6 +124,22 @@ export function TikTokPhoneLiveModal({
     openTikTokLivePopup(sanitizedUsername || username);
   };
 
+  const playVideo = async () => {
+    const video = videoRef.current;
+    if (!video) {
+      return;
+    }
+
+    try {
+      await video.play();
+      setNeedsManualPlay(false);
+      setPlayerState('playing');
+    } catch {
+      setNeedsManualPlay(true);
+      setPlayerState('ready');
+    }
+  };
+
   useEffect(() => {
     if (!open) {
       return;
@@ -133,32 +151,55 @@ export function TikTokPhoneLiveModal({
     }
 
     setPlayerError(null);
+    setPlayerState('loading');
+    setNeedsManualPlay(false);
     video.pause();
     video.removeAttribute('src');
     video.load();
 
     if (!isLive || !playbackUrl) {
+      setPlayerState('idle');
       return;
     }
 
     const onVideoError = () => {
-      setPlayerError('No se pudo cargar el stream en el reproductor.');
+      const errorCode = video.error?.code ? ` Código ${video.error.code}.` : '';
+      setPlayerError(`No se pudo cargar el stream en el reproductor.${errorCode}`);
+      setPlayerState('idle');
+    };
+    const onLoadedMetadata = () => {
+      setPlayerState('ready');
+    };
+    const onPlaying = () => {
+      setNeedsManualPlay(false);
+      setPlayerState('playing');
+    };
+    const onWaiting = () => {
+      setPlayerState('loading');
     };
     video.addEventListener('error', onVideoError);
+    video.addEventListener('loadedmetadata', onLoadedMetadata);
+    video.addEventListener('playing', onPlaying);
+    video.addEventListener('waiting', onWaiting);
 
     const nativeHls = video.canPlayType('application/vnd.apple.mpegurl') !== '';
     if (nativeHls) {
       video.src = playbackUrl;
-      void video.play().catch(() => {
-        // Autoplay might be blocked by browser policy; user can press play manually.
-      });
+      void playVideo();
       return () => {
         video.removeEventListener('error', onVideoError);
+        video.removeEventListener('loadedmetadata', onLoadedMetadata);
+        video.removeEventListener('playing', onPlaying);
+        video.removeEventListener('waiting', onWaiting);
       };
     }
 
     let disposed = false;
-    let hlsInstance: { destroy: () => void } | null = null;
+    let hlsInstance: {
+      destroy: () => void;
+      startLoad?: () => void;
+      recoverMediaError?: () => void;
+    } | null = null;
 
     void (async () => {
       try {
@@ -175,22 +216,32 @@ export function TikTokPhoneLiveModal({
         const hls = new Hls({
           enableWorker: true,
           lowLatencyMode: true,
+          backBufferLength: 30,
         });
         hlsInstance = hls;
         hls.loadSource(playbackUrl);
         hls.attachMedia(video);
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          void video.play().catch(() => {
-            // Autoplay might be blocked by browser policy; user can press play manually.
-          });
+          setPlayerState('ready');
+          void playVideo();
         });
         hls.on(Hls.Events.ERROR, (_event, data) => {
           if (data.fatal) {
-            setPlayerError('No se pudo reproducir el stream HLS.');
+            if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+              hls.startLoad();
+              return;
+            }
+            if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+              hls.recoverMediaError();
+              return;
+            }
+            setPlayerError(`No se pudo reproducir el stream HLS (${data.details ?? data.type}).`);
+            setPlayerState('idle');
           }
         });
       } catch {
         setPlayerError('No se pudo inicializar el reproductor HLS.');
+        setPlayerState('idle');
       }
     })();
 
@@ -198,6 +249,9 @@ export function TikTokPhoneLiveModal({
       disposed = true;
       hlsInstance?.destroy();
       video.removeEventListener('error', onVideoError);
+      video.removeEventListener('loadedmetadata', onLoadedMetadata);
+      video.removeEventListener('playing', onPlaying);
+      video.removeEventListener('waiting', onWaiting);
     };
   }, [open, isLive, playbackUrl]);
 
@@ -223,19 +277,40 @@ export function TikTokPhoneLiveModal({
                     <div className="w-full">
                       {isValidUsername && isLive && playbackUrl ? (
                         <div className="w-full space-y-3">
-                          <video
-                            ref={videoRef}
-                            className="h-full min-h-[420px] w-full rounded-2xl bg-black"
-                            controls
-                            playsInline
-                            muted
-                            autoPlay
-                          />
+                          <div className="relative overflow-hidden rounded-2xl bg-black">
+                            <video
+                              ref={videoRef}
+                              className="aspect-[9/16] max-h-[62vh] min-h-[420px] w-full bg-black object-contain"
+                              controls
+                              playsInline
+                              muted
+                              autoPlay
+                              crossOrigin="anonymous"
+                            />
+                            {needsManualPlay ? (
+                              <div className="absolute inset-0 flex items-center justify-center bg-black/55 p-4">
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  className="bg-blue-600 hover:bg-blue-700"
+                                  onClick={() => {
+                                    void playVideo();
+                                  }}
+                                >
+                                  Reproducir transmisión
+                                </Button>
+                              </div>
+                            ) : null}
+                          </div>
                           {playerError ? (
                             <p className="text-xs text-amber-200">{playerError}</p>
                           ) : (
                             <p className="text-xs text-zinc-400">
-                              Reproduciendo stream HLS en vivo.
+                              {playerState === 'playing'
+                                ? 'Reproduciendo transmisión en vivo.'
+                                : playerState === 'ready'
+                                  ? 'Transmisión lista para reproducir.'
+                                  : 'Cargando transmisión en vivo...'}
                             </p>
                           )}
                         </div>

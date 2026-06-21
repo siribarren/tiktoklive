@@ -5,6 +5,8 @@ import {
   type Message,
 } from './mockData';
 import { readJsonResponse } from '../../lib/http';
+import { registerClientAccounts } from '../dashboard/client-users.mjs';
+import { authFetch } from '../auth/auth';
 
 interface BridgeMessage {
   id: string;
@@ -19,6 +21,7 @@ interface BridgeMessage {
 
 interface BridgeLead {
   id: string;
+  accountUniqueId?: string;
   status: string;
   username: string;
   nickname: string;
@@ -36,6 +39,9 @@ interface BridgeAccount {
   updatedAt?: string;
   startTime?: string;
   endTime?: string | null;
+  campaign?: string;
+  displayName?: string;
+  clientName?: string;
   previousSession?: {
     sessionId?: string;
     startTime?: string;
@@ -109,6 +115,9 @@ interface RecorderBridgeData {
   accounts: Array<{
     uniqueId: string;
     nickname: string;
+    campaign?: string;
+    displayName?: string;
+    clientName?: string;
     status: 'Active' | 'Ended';
     updatedAt: Date | null;
     startTime: Date | null;
@@ -129,32 +138,6 @@ interface RecorderBridgeData {
 }
 
 const POLL_INTERVAL_MS = 2_000;
-const CONTROL_STATUS_TIMEOUT_MS = 4_000;
-const LIVE_ACTIVITY_FALLBACK_MS = 2 * 60 * 1000;
-const WS_INITIAL_BACKOFF_MS = 1_000;
-const WS_MAX_BACKOFF_MS = 15_000;
-const ARCHIVED_ACCOUNT_OVERRIDES: Record<
-  string,
-  {
-    status: 'Ended';
-    updatedAt: string;
-    startTime: string;
-    endTime: string;
-    messagesCount: number;
-    leadsDetected: number;
-    viewers: number;
-  }
-> = {
-  '@f.catalinaa777': {
-    status: 'Ended',
-    updatedAt: '2026-04-16T17:00:55.233699',
-    startTime: '2026-04-16T16:48:17.224387',
-    endTime: '2026-04-16T17:00:55.233699',
-    messagesCount: 43,
-    leadsDetected: 3,
-    viewers: 17,
-  },
-};
 
 function normalizeUniqueId(value?: string): string {
   const trimmed = (value ?? '').trim().toLowerCase();
@@ -218,12 +201,6 @@ function resolveAccountStatus(
   if (hasControlStatus) {
     return runningTargetSet.has(accountLabel) ? 'Active' : 'Ended';
   }
-
-  const archived = ARCHIVED_ACCOUNT_OVERRIDES[accountLabel];
-  if (archived && (account.messagesCount ?? 0) === 0 && (account.leadsDetected ?? 0) === 0) {
-    return archived.status;
-  }
-
   return account.status === 'Active' ? 'Active' : 'Ended';
 }
 
@@ -325,19 +302,13 @@ function mapAccountToSession(
   hasControlStatus: boolean
 ): LiveSession {
   const accountLabel = normalizeUniqueId(account.uniqueId) || '@sin_cuenta';
-  const archived = ARCHIVED_ACCOUNT_OVERRIDES[accountLabel];
   const resolvedStatus = resolveAccountStatus(account, runningTargetSet, hasControlStatus);
-  const resolvedStartTime =
-    archived && !account.startTime ? archived.startTime : account.startTime;
-  const resolvedEndTime =
-    archived && !account.endTime && resolvedStatus === 'Ended' ? archived.endTime : account.endTime;
-
-  const startTime = resolvedStartTime
-    ? new Date(resolvedStartTime)
+  const startTime = account.startTime
+    ? new Date(account.startTime)
     : account.updatedAt
     ? new Date(account.updatedAt)
     : new Date();
-  const endTime = resolvedEndTime ? new Date(resolvedEndTime) : undefined;
+  const endTime = account.endTime ? new Date(account.endTime) : undefined;
   const previousSession = (() => {
     const rawPrevious = account.previousSession;
     if (!rawPrevious) {
@@ -495,9 +466,11 @@ function mapPayload(
     const resolvedTotalScore = resolveLeadTotalScore(lead);
     return {
       accountUniqueId:
+        normalizeUniqueId(lead.accountUniqueId) ||
         lead.messages
           .map((message) => leadSessionAccountMap.get(String(message.sessionId ?? '').trim()) ?? '')
-          .find(Boolean) || undefined,
+          .find(Boolean) ||
+        undefined,
       id: lead.id,
       status: normalizeLeadStatus(resolvedTotalScore, lead.status),
       username: lead.username,
@@ -512,38 +485,21 @@ function mapPayload(
 
   const accounts = rawAccounts.map((account) => ({
     uniqueId: normalizeUniqueId(account.uniqueId) || '@sin_cuenta',
-    nickname: (normalizeUniqueId(account.uniqueId) || '@sin_cuenta').replace(/^@/, ''),
+    nickname:
+      String(account.displayName ?? '').trim() ||
+      (normalizeUniqueId(account.uniqueId) || '@sin_cuenta').replace(/^@/, ''),
+    campaign: String(account.campaign ?? '').trim() || undefined,
+    displayName: String(account.displayName ?? '').trim() || undefined,
+    clientName: String(account.clientName ?? '').trim() || undefined,
     status: resolveAccountStatus(account, runningTargetSet, hasControlStatus),
-    updatedAt: account.updatedAt
-      ? new Date(account.updatedAt)
-      : ARCHIVED_ACCOUNT_OVERRIDES[normalizeUniqueId(account.uniqueId)]?.updatedAt
-      ? new Date(ARCHIVED_ACCOUNT_OVERRIDES[normalizeUniqueId(account.uniqueId)].updatedAt)
-      : null,
-    startTime: account.startTime
-      ? new Date(account.startTime)
-      : ARCHIVED_ACCOUNT_OVERRIDES[normalizeUniqueId(account.uniqueId)]?.startTime
-      ? new Date(ARCHIVED_ACCOUNT_OVERRIDES[normalizeUniqueId(account.uniqueId)].startTime)
-      : null,
+    updatedAt: account.updatedAt ? new Date(account.updatedAt) : null,
+    startTime: account.startTime ? new Date(account.startTime) : null,
     endTime: account.endTime
       ? new Date(account.endTime)
-      : ARCHIVED_ACCOUNT_OVERRIDES[normalizeUniqueId(account.uniqueId)]?.endTime
-      ? new Date(ARCHIVED_ACCOUNT_OVERRIDES[normalizeUniqueId(account.uniqueId)].endTime)
       : null,
-    messagesCount:
-      ARCHIVED_ACCOUNT_OVERRIDES[normalizeUniqueId(account.uniqueId)] &&
-      (account.messagesCount ?? 0) === 0
-        ? ARCHIVED_ACCOUNT_OVERRIDES[normalizeUniqueId(account.uniqueId)].messagesCount
-        : account.messagesCount ?? 0,
-    leadsDetected:
-      ARCHIVED_ACCOUNT_OVERRIDES[normalizeUniqueId(account.uniqueId)] &&
-      (account.leadsDetected ?? 0) === 0
-        ? ARCHIVED_ACCOUNT_OVERRIDES[normalizeUniqueId(account.uniqueId)].leadsDetected
-        : account.leadsDetected ?? 0,
-    viewers:
-      ARCHIVED_ACCOUNT_OVERRIDES[normalizeUniqueId(account.uniqueId)] &&
-      (account.viewers ?? 0) === 0
-        ? ARCHIVED_ACCOUNT_OVERRIDES[normalizeUniqueId(account.uniqueId)].viewers
-        : account.viewers ?? 0,
+    messagesCount: account.messagesCount ?? 0,
+    leadsDetected: account.leadsDetected ?? 0,
+    viewers: account.viewers ?? 0,
   }));
   for (const account of accounts) {
     const currentStatus = liveStatuses[account.uniqueId];
@@ -630,105 +586,40 @@ function mapPayload(
   };
 }
 
-function buildRecorderWsUrl(): string {
-  const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-  return `${protocol}://${window.location.host}/recorder-api/ws`;
-}
-
 export function useRecorderBridge() {
   const [data, setData] = useState<RecorderBridgeData>(buildFallbackData);
 
   useEffect(() => {
     let active = true;
     let pollingIntervalId: number | null = null;
-    let reconnectTimeoutId: number | null = null;
-    let websocket: WebSocket | null = null;
-    let reconnectAttempt = 0;
-    let isClosingSocket = false;
-
-    const applyBridgeData = (
-      payload: BridgePayload,
-      controlStatusPayload?: ControlStatusPayload | null,
-      loadedAt: Date = new Date()
-    ) => {
-      if (!active) {
-        return;
-      }
-
-      setData((previous) => {
-        const mappedData = mapPayload(payload, controlStatusPayload, loadedAt);
-        if (controlStatusPayload) {
-          return mappedData;
-        }
-
-        const resolvedConfiguredTargets =
-          mappedData.configuredTargets.length > 0
-            ? mappedData.configuredTargets
-            : previous.configuredTargets;
-        const resolvedRunningTargets =
-          mappedData.runningTargets.length > 0
-            ? mappedData.runningTargets
-            : previous.runningTargets;
-        const resolvedOnlineTargets = mappedData.onlineTargets;
-        const resolvedLiveStatuses = mappedData.liveStatuses;
-        const resolvedMonitoringSince =
-          Object.keys(mappedData.monitoringSince).length > 0
-            ? mappedData.monitoringSince
-            : previous.monitoringSince;
-        const resolvedConnectionErrors =
-          Object.keys(mappedData.connectionErrors).length > 0
-            ? mappedData.connectionErrors
-            : previous.connectionErrors;
-
-        return {
-          ...mappedData,
-          configuredTargets: resolvedConfiguredTargets,
-          runningTargets: resolvedRunningTargets,
-          onlineTargets: resolvedOnlineTargets,
-          liveStatuses: resolvedLiveStatuses,
-          monitoringSince: resolvedMonitoringSince,
-          connectionErrors: resolvedConnectionErrors,
-        };
-      });
-    };
 
     const loadFromPolling = async () => {
       try {
-        const controlStatusRequest = (() => {
-          const controller = new AbortController();
-          const timeoutId = window.setTimeout(() => controller.abort(), CONTROL_STATUS_TIMEOUT_MS);
-          return fetch(`/recorder-api/status?t=${Date.now()}`, {
-            cache: 'no-store',
-            signal: controller.signal,
-          })
-            .then(async (response) => {
-              if (!response.ok) {
-                return null;
-              }
-              return await readJsonResponse<ControlStatusPayload>(response);
-            })
-            .catch(() => null)
-            .finally(() => {
-              window.clearTimeout(timeoutId);
-            });
-        })();
-
-        const [response, controlStatusPayload] = await Promise.all([
-          fetch(`/current_messages.json?t=${Date.now()}`, {
-            cache: 'no-store',
-          }),
-          controlStatusRequest,
-        ]);
+        const response = await authFetch(`/recorder-api/db-snapshot?t=${Date.now()}`, {
+          cache: 'no-store',
+        });
+        if (response.status === 401) {
+          registerClientAccounts([]);
+          if (active) {
+            setData(buildFallbackData());
+          }
+          return;
+        }
         if (!response.ok) {
-          throw new Error(`Bridge fetch failed: ${response.status}`);
+          throw new Error(`DB snapshot fetch failed: ${response.status}`);
         }
-        const payload = await readJsonResponse<BridgePayload>(response);
-        if (!payload) {
-          throw new Error('Bridge payload vacío o inválido.');
+        const snapshot = await readJsonResponse<RealtimeSnapshotPayload>(response);
+        if (!snapshot?.bridgePayload) {
+          throw new Error('DB snapshot vacío o inválido.');
         }
-        applyBridgeData(payload, controlStatusPayload, new Date());
+        registerClientAccounts(snapshot.bridgePayload.accounts ?? []);
+        setData(mapPayload(snapshot.bridgePayload, snapshot.controlStatus ?? null, new Date()));
       } catch (error) {
-        console.error('Failed to load recorder bridge JSON', error);
+        console.error('Failed to load recorder DB snapshot', error);
+        if (active) {
+          registerClientAccounts([]);
+          setData(buildFallbackData());
+        }
       }
     };
 
@@ -750,74 +641,11 @@ export function useRecorderBridge() {
       pollingIntervalId = null;
     };
 
-    const scheduleReconnect = () => {
-      if (!active || reconnectTimeoutId !== null) {
-        return;
-      }
-      const delay = Math.min(
-        WS_MAX_BACKOFF_MS,
-        WS_INITIAL_BACKOFF_MS * 2 ** reconnectAttempt
-      );
-      reconnectAttempt += 1;
-      reconnectTimeoutId = window.setTimeout(() => {
-        reconnectTimeoutId = null;
-        connectWebSocket();
-      }, delay);
-    };
-
-    const handleRealtimeSnapshot = (snapshot: RealtimeSnapshotPayload) => {
-      if (!snapshot.bridgePayload) {
-        return;
-      }
-      reconnectAttempt = 0;
-      stopPolling();
-      applyBridgeData(snapshot.bridgePayload, snapshot.controlStatus ?? null, new Date());
-    };
-
-    const connectWebSocket = () => {
-      if (!active || websocket !== null) {
-        return;
-      }
-      isClosingSocket = false;
-      websocket = new WebSocket(buildRecorderWsUrl());
-
-      websocket.onmessage = (event) => {
-        try {
-          const snapshot = JSON.parse(String(event.data)) as RealtimeSnapshotPayload;
-          handleRealtimeSnapshot(snapshot);
-        } catch (error) {
-          console.error('Failed to parse recorder websocket payload', error);
-        }
-      };
-
-      websocket.onerror = () => {
-        // handled by onclose
-      };
-
-      websocket.onclose = () => {
-        websocket = null;
-        if (!active || isClosingSocket) {
-          return;
-        }
-        startPolling();
-        scheduleReconnect();
-      };
-    };
-
     startPolling();
-    connectWebSocket();
 
     return () => {
       active = false;
       stopPolling();
-      if (reconnectTimeoutId !== null) {
-        window.clearTimeout(reconnectTimeoutId);
-      }
-      if (websocket !== null) {
-        isClosingSocket = true;
-        websocket.close();
-        websocket = null;
-      }
     };
   }, []);
 

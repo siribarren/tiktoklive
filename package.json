@@ -6,6 +6,7 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite",
+    "dev:all": "node ./scripts/dev-stack.mjs",
     "test:dashboard-metrics": "node ./scripts/dashboard-metrics.test.mjs"
   },
   "dependencies": {

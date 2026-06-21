@@ -12,9 +12,12 @@ import {
   Bell,
   CheckCircle2,
   X,
+  LogOut,
 } from 'lucide-react';
 import { Avatar, AvatarFallback } from './ui/avatar';
+import { Button } from './ui/button';
 import { useRecorderBridge } from '../data/useRecorderBridge';
+import { useAuth } from '../auth/auth';
 
 const LIVE_STATUS_FRESHNESS_MS = 90 * 1000;
 const NOTIFICATION_AUTO_DISMISS_MS = 10 * 1000;
@@ -63,12 +66,13 @@ const navigation = [
   { name: 'Mensajes', href: '/messages', icon: MessageSquare },
   { name: 'Leads', href: '/leads', icon: Sparkles },
   { name: 'Cuentas', href: '/accounts', icon: Building2 },
-  { name: 'Reglas', href: '/rules', icon: Settings },
-  { name: 'Configuración', href: '/settings', icon: Settings },
+  { name: 'Reglas', href: '/rules', icon: Settings, adminOnly: true },
+  { name: 'Configuración', href: '/settings', icon: Settings, adminOnly: true },
 ];
 
 export function DashboardLayout() {
   const location = useLocation();
+  const { user, logout } = useAuth();
   const { runningTargets, configuredTargets, liveStatuses, updatedAt, liveSessions } = useRecorderBridge();
   const [onlineNotifications, setOnlineNotifications] = useState<OnlineNotification[]>([]);
   const [notificationHistory, setNotificationHistory] = useState<OnlineNotification[]>([]);
@@ -270,11 +274,24 @@ export function DashboardLayout() {
   }, []);
 
   const latestFiveNotifications = dedupeNotificationsByTarget(notificationHistory).slice(0, 5);
+  const isAdminUser = user?.role === 'administrator';
+  const visibleNavigation = navigation.filter((item) => !item.adminOnly || isAdminUser);
+  const userRoleLabel =
+    user?.role === 'administrator'
+      ? 'Administrador'
+      : user?.role === 'supervisor'
+        ? 'Supervisor'
+        : user?.role === 'client'
+          ? 'Cliente'
+          : user?.role === 'executive'
+            ? 'Ejecutivo'
+            : 'Usuario';
+  const userScopeLabel = user?.clientCode ? user.clientCode : 'Todos los clientes';
 
   return (
-    <div className="flex h-screen bg-gray-50">
+    <div className="flex min-h-screen bg-gray-50">
       {/* Sidebar */}
-      <aside className="w-64 bg-white border-r border-gray-200 flex flex-col">
+      <aside className="fixed inset-y-0 left-0 z-50 flex w-64 flex-col overflow-hidden border-r border-gray-200 bg-white">
         <div className="p-6 border-b border-gray-200">
           <div className="flex items-center gap-2">
             <img
@@ -284,13 +301,13 @@ export function DashboardLayout() {
             />
             <div>
               <h1 className="font-semibold text-gray-900">Ember</h1>
-              <p className="text-xs text-gray-500">Monitor de Leads TikTok</p>
+              <p className="text-xs text-gray-500">Monitor de Leads</p>
             </div>
           </div>
         </div>
 
-        <nav className="flex-1 p-4 space-y-1">
-          {navigation.map((item) => {
+        <nav className="min-h-0 flex-1 space-y-1 overflow-y-auto p-4">
+          {visibleNavigation.map((item) => {
             const isActive = location.pathname === item.href;
             return (
               <Link
@@ -318,16 +335,31 @@ export function DashboardLayout() {
             </Avatar>
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium text-gray-900 truncate">
-                Usuario administrador
+                {user?.displayName ?? 'Usuario'}
               </p>
-              <p className="text-xs text-gray-500 truncate">admin@leadintel.com</p>
+              <p className="text-xs text-gray-500 truncate">{user?.login ?? ''}</p>
+              <p className="text-[11px] text-gray-400 truncate">
+                {userRoleLabel} · {userScopeLabel}
+              </p>
             </div>
+          </div>
+          <div className="mt-3 px-3">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="w-full justify-start gap-2"
+              onClick={() => void logout()}
+            >
+              <LogOut className="h-4 w-4" />
+              Cerrar sesión
+            </Button>
           </div>
         </div>
       </aside>
 
       {/* Main Content */}
-      <div className="flex-1 flex flex-col overflow-hidden">
+      <div className="ml-64 flex-1 flex flex-col overflow-hidden">
         {/* Top Bar */}
         <header className="h-16 bg-white border-b border-gray-200 flex items-center justify-end px-6">
           <div className="flex items-center gap-4">

@@ -6,8 +6,15 @@ import { Card, CardContent } from './ui/card';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { useRecorderBridge } from '../data/useRecorderBridge';
+import { useAuth } from '../auth/auth';
+import { getDefaultDisplayNameForAccount, getUsersForClient } from '../dashboard/client-users.mjs';
 import type { LiveSession, Message } from '../data/mockData';
+
+const DASHBOARD_CLIENT_STORAGE_KEY = 'ember:dashboard:selected-client';
+const ALL_AGENTS_VALUE = 'all';
+type SessionClientFilter = 'WOM' | 'CLARO';
 
 function normalizeUniqueId(value?: string | null): string {
   const trimmed = (value ?? '').trim().toLowerCase();
@@ -34,12 +41,32 @@ function matchesMessageToSession(message: Message, session: LiveSession): boolea
 
 export function LiveMessages() {
   const [searchParams] = useSearchParams();
+  const { user } = useAuth();
   const { allMessages, liveSessions, runningTargets } = useRecorderBridge();
+  const isAdminUser = user?.role === 'administrator';
   const requestedSessionId = (searchParams.get('sessionId') ?? '').trim();
+  const requestedAgentAccount = normalizeUniqueId(searchParams.get('account'));
   const [messageSearch, setMessageSearch] = useState(requestedSessionId);
   const [sortByScore, setSortByScore] = useState(false);
+  const [selectedClient, setSelectedClient] = useState<SessionClientFilter>(() => {
+    const fallbackClient: SessionClientFilter = user?.clientCode === 'CLARO' ? 'CLARO' : 'WOM';
+    if (!isAdminUser || typeof window === 'undefined') {
+      return fallbackClient;
+    }
+
+    const storedClient = window.localStorage.getItem(DASHBOARD_CLIENT_STORAGE_KEY);
+    if (storedClient === 'CLARO_PHOENIX') {
+      return 'CLARO';
+    }
+    if (storedClient === 'WOM' || storedClient === 'CLARO') {
+      return storedClient;
+    }
+    return fallbackClient;
+  });
+  const [selectedAgentAccount, setSelectedAgentAccount] = useState<string>(
+    requestedAgentAccount || ALL_AGENTS_VALUE
+  );
   const onlyLeads = searchParams.get('onlyLeads') === '1';
-  const hasMonitoredAccounts = runningTargets.length > 0;
 
   useEffect(() => {
     if (!requestedSessionId) {
@@ -48,9 +75,96 @@ export function LiveMessages() {
     setMessageSearch(requestedSessionId);
   }, [requestedSessionId]);
 
+  useEffect(() => {
+    if (!requestedAgentAccount) {
+      return;
+    }
+    setSelectedAgentAccount(requestedAgentAccount);
+  }, [requestedAgentAccount]);
+
+  useEffect(() => {
+    if (!isAdminUser) {
+      setSelectedClient(user?.clientCode === 'CLARO' ? 'CLARO' : 'WOM');
+      return;
+    }
+
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const syncSelectedClient = () => {
+      const storedClient = window.localStorage.getItem(DASHBOARD_CLIENT_STORAGE_KEY);
+      if (storedClient === 'CLARO_PHOENIX') {
+        setSelectedClient('CLARO');
+        return;
+      }
+      if (storedClient === 'WOM' || storedClient === 'CLARO') {
+        setSelectedClient(storedClient);
+      }
+    };
+
+    syncSelectedClient();
+    window.addEventListener('storage', syncSelectedClient);
+    return () => {
+      window.removeEventListener('storage', syncSelectedClient);
+    };
+  }, [isAdminUser, user?.clientCode]);
+
+  const availableAgentOptions = useMemo(() => {
+    const selectedClientAccounts = getUsersForClient(selectedClient)
+      .map((account) => {
+        const normalizedAccount = normalizeUniqueId(account);
+        if (!normalizedAccount) {
+          return null;
+        }
+
+        const displayName = getDefaultDisplayNameForAccount(normalizedAccount) ?? normalizedAccount;
+        const label =
+          displayName === normalizedAccount
+            ? normalizedAccount
+            : `${displayName} (${normalizedAccount})`;
+
+        return {
+          value: normalizedAccount,
+          label,
+        };
+      })
+      .filter(Boolean) as Array<{ value: string; label: string }>;
+
+    return selectedClientAccounts.sort((left, right) =>
+      left.label.localeCompare(right.label, 'es-CL')
+    );
+  }, [selectedClient]);
+  const selectedClientAccountSet = useMemo(
+    () => new Set(availableAgentOptions.map((option) => option.value)),
+    [availableAgentOptions]
+  );
+  const scopedRunningTargets = useMemo(
+    () =>
+      runningTargets.filter((target) => selectedClientAccountSet.has(normalizeUniqueId(target))),
+    [runningTargets, selectedClientAccountSet]
+  );
+  const hasMonitoredAccounts = scopedRunningTargets.length > 0;
+
+  useEffect(() => {
+    if (selectedAgentAccount === ALL_AGENTS_VALUE) {
+      return;
+    }
+
+    const isValidSelection = availableAgentOptions.some(
+      (option) => option.value === selectedAgentAccount
+    );
+    if (!isValidSelection) {
+      setSelectedAgentAccount(ALL_AGENTS_VALUE);
+    }
+  }, [availableAgentOptions, selectedAgentAccount]);
+
   const sessionByToken = useMemo(() => {
     const entries = new Map<string, LiveSession>();
     for (const session of liveSessions) {
+      if (!selectedClientAccountSet.has(normalizeUniqueId(session.accountName))) {
+        continue;
+      }
       entries.set(session.id.toLowerCase(), session);
       const rawSessionId = (session.rawSessionId ?? '').toLowerCase();
       if (rawSessionId) {
@@ -58,7 +172,7 @@ export function LiveMessages() {
       }
     }
     return entries;
-  }, [liveSessions]);
+  }, [liveSessions, selectedClientAccountSet]);
 
   const resolveMessageSession = (message: Message) => {
     const token = message.sessionId.toLowerCase();
@@ -67,20 +181,47 @@ export function LiveMessages() {
       return directMatch;
     }
 
-    return liveSessions.find((session) => matchesMessageToSession(message, session));
+    return selectedClientSessions.find((session) => matchesMessageToSession(message, session));
   };
 
   const trimmedSearch = messageSearch.trim();
   const normalizedSearch = trimmedSearch.toLowerCase();
   const normalizedSearchAccount = normalizeUniqueId(trimmedSearch);
   const hasSearchQuery = normalizedSearch.length > 0;
-  const activeSessions = useMemo(
-    () => liveSessions.filter((session) => session.status === 'Active'),
-    [liveSessions]
+  const selectedClientSessions = useMemo(
+    () =>
+      liveSessions.filter((session) =>
+        selectedClientAccountSet.has(normalizeUniqueId(session.accountName))
+      ),
+    [liveSessions, selectedClientAccountSet]
   );
+  const filteredSessionsByAgent = useMemo(() => {
+    if (selectedAgentAccount === ALL_AGENTS_VALUE) {
+      return selectedClientSessions;
+    }
+
+    const normalizedSelectedAgent = normalizeUniqueId(selectedAgentAccount);
+    return selectedClientSessions.filter(
+      (session) => normalizeUniqueId(session.accountName) === normalizedSelectedAgent
+    );
+  }, [selectedAgentAccount, selectedClientSessions]);
+  const filteredActiveSessionsByAgent = useMemo(
+    () => filteredSessionsByAgent.filter((session) => session.status === 'Active'),
+    [filteredSessionsByAgent]
+  );
+  const selectedAgentLabel = useMemo(() => {
+    if (selectedAgentAccount === ALL_AGENTS_VALUE) {
+      return 'Todas las cuentas';
+    }
+
+    return (
+      availableAgentOptions.find((option) => option.value === selectedAgentAccount)?.label ??
+      selectedAgentAccount
+    );
+  }, [availableAgentOptions, selectedAgentAccount]);
   const activeSessionTokens = useMemo(() => {
     const tokens = new Set<string>();
-    activeSessions.forEach((session) => {
+    filteredActiveSessionsByAgent.forEach((session) => {
       tokens.add(session.id.toLowerCase());
       const rawSessionId = (session.rawSessionId ?? '').toLowerCase();
       if (rawSessionId) {
@@ -88,11 +229,18 @@ export function LiveMessages() {
       }
     });
     return tokens;
-  }, [activeSessions]);
-  const isRealtimeMode = hasMonitoredAccounts && !hasSearchQuery && activeSessions.length > 0;
+  }, [filteredActiveSessionsByAgent]);
+  const isRealtimeMode = hasMonitoredAccounts && !hasSearchQuery && filteredActiveSessionsByAgent.length > 0;
 
   const filteredBySearch = hasMonitoredAccounts && hasSearchQuery
     ? allMessages.filter((message) => {
+        const matchesSelectedAgent =
+          selectedAgentAccount === ALL_AGENTS_VALUE ||
+          filteredSessionsByAgent.some((session) => matchesMessageToSession(message, session));
+        if (!matchesSelectedAgent) {
+          return false;
+        }
+
         const matchedSession = resolveMessageSession(message);
         const sessionAccount = normalizeUniqueId(matchedSession?.accountName);
         const matchedSessionId = (matchedSession?.id ?? '').toLowerCase();
@@ -115,12 +263,19 @@ export function LiveMessages() {
 
   const realtimeMessages = hasMonitoredAccounts && isRealtimeMode
     ? allMessages.filter((message) => {
+        const matchesSelectedAgent =
+          selectedAgentAccount === ALL_AGENTS_VALUE ||
+          filteredActiveSessionsByAgent.some((session) => matchesMessageToSession(message, session));
+        if (!matchesSelectedAgent) {
+          return false;
+        }
+
         const directSessionToken = message.sessionId.toLowerCase();
         if (activeSessionTokens.has(directSessionToken)) {
           return true;
         }
 
-        return activeSessions.some((session) => matchesMessageToSession(message, session));
+        return filteredActiveSessionsByAgent.some((session) => matchesMessageToSession(message, session));
       })
     : [];
 
@@ -140,12 +295,18 @@ export function LiveMessages() {
     : filteredByLead;
 
   const headerText = hasSearchQuery
-    ? `Resultados para "${trimmedSearch}"`
+    ? selectedAgentAccount === ALL_AGENTS_VALUE
+      ? `Resultados para "${trimmedSearch}"`
+      : `Resultados para "${trimmedSearch}" en ${selectedAgentLabel}.`
     : !hasMonitoredAccounts
     ? 'Sin cuentas monitoreadas: inicia el monitoreo para ver mensajes.'
     : isRealtimeMode
-    ? 'Mensajes en tiempo real de transmisiones activas.'
-    : 'Sin mensajes: busca por @usuario o ID para consultar historial.';
+    ? selectedAgentAccount === ALL_AGENTS_VALUE
+      ? 'Mensajes en tiempo real de transmisiones activas.'
+      : `Mensajes en tiempo real de ${selectedAgentLabel}.`
+    : selectedAgentAccount === ALL_AGENTS_VALUE
+    ? 'Sin mensajes: busca por @usuario o ID para consultar historial.'
+    : `Sin transmisión activa para ${selectedAgentLabel}: busca por @usuario o ID para consultar su historial.`;
 
   return (
     <div className="p-6 space-y-6">
@@ -158,7 +319,7 @@ export function LiveMessages() {
 
       <Card>
         <CardContent className="pt-6">
-          <div className="flex items-center gap-4">
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
             <div className="flex items-center gap-2 flex-1 max-w-xl">
               <div className="relative flex-1">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
@@ -184,16 +345,40 @@ export function LiveMessages() {
                 Buscar
               </Button>
             </div>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={!hasMonitoredAccounts || (!hasSearchQuery && !isRealtimeMode)}
-              className={`gap-2 ${sortByScore ? 'border-blue-300 bg-blue-50 text-blue-700' : ''}`}
-              onClick={() => setSortByScore((current) => !current)}
-            >
-              <Filter className="w-4 h-4" />
-              {sortByScore ? 'Puntaje: mayor a menor' : 'Filtrar por puntaje'}
-            </Button>
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-gray-500 whitespace-nowrap">Agente</span>
+                <Select
+                  value={selectedAgentAccount}
+                  onValueChange={setSelectedAgentAccount}
+                >
+                  <SelectTrigger
+                    className="w-full bg-white sm:w-[260px]"
+                    disabled={!hasMonitoredAccounts || availableAgentOptions.length === 0}
+                  >
+                    <SelectValue placeholder="Seleccionar agente" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={ALL_AGENTS_VALUE}>Todas las cuentas</SelectItem>
+                    {availableAgentOptions.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={!hasMonitoredAccounts || (!hasSearchQuery && !isRealtimeMode)}
+                className={`gap-2 ${sortByScore ? 'border-blue-300 bg-blue-50 text-blue-700' : ''}`}
+                onClick={() => setSortByScore((current) => !current)}
+              >
+                <Filter className="w-4 h-4" />
+                {sortByScore ? 'Puntaje: mayor a menor' : 'Filtrar por puntaje'}
+              </Button>
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -208,19 +393,26 @@ export function LiveMessages() {
 
           {!hasMonitoredAccounts ? (
             <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-6 text-sm text-gray-600">
-              No hay cuentas monitoreadas. Ve a <span className="font-medium">Cuentas</span> y comienza un monitoreo para habilitar mensajes.
+              No hay cuentas monitoreadas para este cliente. Ve a{' '}
+              <span className="font-medium">Cuentas</span> y comienza un monitoreo para habilitar mensajes.
             </div>
           ) : !hasSearchQuery && !isRealtimeMode ? (
             <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-6 text-sm text-gray-600">
-              No hay transmisión activa. Ingresa un <span className="font-medium">@usuario</span> o un <span className="font-medium">ID</span> para buscar mensajes.
+              No hay transmisión activa para este cliente. Ingresa un{' '}
+              <span className="font-medium">@usuario</span> o un <span className="font-medium">ID</span>{' '}
+              para buscar mensajes.
             </div>
           ) : (
             <div className="space-y-3">
               {orderedMessages.length === 0 ? (
                 <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-6 text-sm text-gray-600">
                   {isRealtimeMode
-                    ? 'Esperando mensajes en tiempo real para la transmisión activa.'
-                    : `No se encontraron mensajes para "${trimmedSearch}".`}
+                    ? selectedAgentAccount === ALL_AGENTS_VALUE
+                      ? 'Esperando mensajes en tiempo real para la transmisión activa.'
+                      : `Esperando mensajes en tiempo real para ${selectedAgentLabel}.`
+                    : selectedAgentAccount === ALL_AGENTS_VALUE
+                    ? `No se encontraron mensajes para "${trimmedSearch}".`
+                    : `No se encontraron mensajes para "${trimmedSearch}" en ${selectedAgentLabel}.`}
                 </div>
               ) : null}
               {orderedMessages.map((message) => {

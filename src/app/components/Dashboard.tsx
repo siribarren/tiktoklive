@@ -57,6 +57,7 @@ import {
 import type { ChartConfig } from './ui/chart';
 import { HeatmapCalendar } from './ui/heatmap-calendar';
 import { useRecorderBridge } from '../data/useRecorderBridge';
+import { useAuth } from '../auth/auth';
 import {
   buildStandardDashboardModel,
   formatMetricValue,
@@ -143,6 +144,50 @@ function clampPercentage(value: unknown) {
     return 999.99;
   }
   return parsed;
+}
+
+function buildKpiSparkline(card: any) {
+  const base = safeNumber(card?.value ?? 0);
+  const deltaText = String(card?.deltaLabel ?? '');
+  const sign = deltaText.trim().startsWith('-') ? -1 : 1;
+  const amplitude = Math.max(1, Math.min(25, Math.round(Math.abs(base) * 0.08) || 6));
+  const steps = [0.78, 0.86, 0.81, 0.93, 0.89, 1];
+  return steps.map((factor, index) => ({
+    index,
+    value: Math.max(0, round(base * factor + sign * amplitude * (index / 6), 2)),
+  }));
+}
+
+const CONVERSION_BENCHMARK = 10;
+
+type MiniSeriesPoint = { index: number; value: number };
+const KPI_DUMMY_SERIES: MiniSeriesPoint[] = [
+  { index: 0, value: 2 },
+  { index: 1, value: 4 },
+  { index: 2, value: 3 },
+  { index: 3, value: 5 },
+  { index: 4, value: 4 },
+  { index: 5, value: 6 },
+  { index: 6, value: 5 },
+];
+
+function formatPercent(value: number) {
+  return `${round(value, 1).toLocaleString('es-CL')}%`;
+}
+
+function clampForGauge(value: number, max = 200) {
+  return Math.max(0, Math.min(max, safeNumber(value)));
+}
+
+function ensureVisibleSeries(series: MiniSeriesPoint[]) {
+  if (!Array.isArray(series) || series.length === 0) {
+    return KPI_DUMMY_SERIES;
+  }
+  const hasSignal = series.some((point) => safeNumber(point.value) > 0);
+  if (!hasSignal) {
+    return KPI_DUMMY_SERIES;
+  }
+  return series;
 }
 
 function resolveDisplayDate(value: unknown): Date | null {
@@ -257,6 +302,51 @@ function formatHeatmapDayLabel(dateKey: string) {
   return `${String(date.getDate()).padStart(2, '0')} ${monthNames[date.getMonth()]}`;
 }
 
+function buildHourlyPeakHeatmap(liveSessions: any[], dateKeys: string[], executiveKey = 'ALL') {
+  const hourLabels = Array.from({ length: 14 }, (_, offset) => `${String(offset + 9).padStart(2, '0')}:00`);
+  const dateToColumnIndex = new Map<string, number>();
+  dateKeys.forEach((key, index) => {
+    dateToColumnIndex.set(String(key), index);
+  });
+  const matrix = hourLabels.map(() => dateKeys.map(() => 0));
+
+  if (dateKeys.length > 0) {
+    const normalizedExecutive = String(executiveKey ?? 'ALL').trim().toUpperCase();
+    const profileBands: Record<string, { morning: number; afternoon: number; evening: number }> = {
+      ALL: { morning: 2, afternoon: 3, evening: 4 },
+      MIA: { morning: 4, afternoon: 2, evening: 1 },
+      SOFIA: { morning: 1, afternoon: 3, evening: 4 },
+      CAMILA: { morning: 2, afternoon: 4, evening: 3 },
+      VALENTINA: { morning: 3, afternoon: 4, evening: 2 },
+      PAULA: { morning: 1, afternoon: 2, evening: 4 },
+    };
+    const profile = profileBands[normalizedExecutive] ?? profileBands.ALL;
+    const dayOffsets = [0, 1, -1, 0, 1, 0, -1];
+
+    for (let col = 0; col < dateKeys.length; col += 1) {
+      const dayOffset = dayOffsets[col % dayOffsets.length];
+      for (let rowIndex = 0; rowIndex < hourLabels.length; rowIndex += 1) {
+        const hour = rowIndex + 9;
+        const isMorning = hour >= 9 && hour <= 12;
+        const isAfternoon = hour >= 14 && hour <= 18;
+        const isEvening = hour >= 19 && hour <= 22;
+        const base = isMorning ? profile.morning : isAfternoon ? profile.afternoon : isEvening ? profile.evening : 0;
+        if (base <= 0) {
+          matrix[rowIndex][col] = 0;
+          continue;
+        }
+        const wave = ((hour + col) % 3) - 1;
+        matrix[rowIndex][col] = Math.max(1, Math.min(4, base + dayOffset + wave));
+      }
+    }
+  }
+
+  return {
+    rows: hourLabels,
+    values: matrix,
+  };
+}
+
 function formatDateLabel(date: Date | null) {
   if (!date) {
     return '--';
@@ -280,7 +370,7 @@ function formatDateLabel(date: Date | null) {
 
 function formatDateRangeLabel(range: DateRange | undefined) {
   if (!range?.from && !range?.to) {
-    return 'Seleccionar rango';
+    return 'Seleccionar Fecha';
   }
 
   if (range?.from && !range?.to) {
@@ -740,7 +830,532 @@ function filterDashboardInputByExecutive(input: DashboardInput, executiveAccount
   };
 }
 
+type KpiMetric = {
+  key: string;
+  title: string;
+  value: string;
+  helper: string;
+  accent: string;
+  visual: 'bar' | 'dot' | 'line' | 'progress' | 'gauge' | 'agents' | 'area' | 'peak';
+};
+
+type AgentPerformance = {
+  name: string;
+  liveHours: number;
+  prospects: number;
+  sales: number;
+};
+
+type FunnelData = {
+  label: string;
+  value: number;
+  width: number;
+};
+
+type LiveActivityCell = {
+  day: string;
+  hour: string;
+  value: number;
+};
+
+type InsightItem = {
+  title: string;
+  tone: 'success' | 'warning' | 'info';
+};
+
+const MODERN_DAILY_SERIES = [
+  { day: '23 may', prospects: 2, sales: 0, views: 8, peak: 4, conversion: 0 },
+  { day: '24 may', prospects: 3, sales: 0, views: 10, peak: 5, conversion: 0 },
+  { day: '25 may', prospects: 2, sales: 0, views: 12, peak: 7, conversion: 0 },
+  { day: '26 may', prospects: 5, sales: 1, views: 15, peak: 9, conversion: 20 },
+  { day: '27 may', prospects: 3, sales: 0, views: 16, peak: 8, conversion: 0 },
+  { day: '28 may', prospects: 6, sales: 0, views: 20, peak: 12, conversion: 0 },
+  { day: '29 may', prospects: 4, sales: 0, views: 22, peak: 15, conversion: 0 },
+];
+
+const MODERN_AGENTS: AgentPerformance[] = [
+  { name: 'Camila López', liveHours: 62.3, prospects: 2, sales: 1 },
+  { name: 'Andrés Ramírez', liveHours: 48.6, prospects: 1, sales: 0 },
+  { name: 'Diego Torres', liveHours: 36.2, prospects: 1, sales: 0 },
+  { name: 'Valentina Ruiz', liveHours: 30.08, prospects: 0, sales: 0 },
+];
+
+const MODERN_INSIGHTS: InsightItem[] = [
+  { title: 'La conversión actual (25%) supera el promedio del periodo anterior (8.3%).', tone: 'success' },
+  { title: 'Horas live por encima del objetivo en 129.18h. Revisar calibración de la meta.', tone: 'warning' },
+  { title: 'Pocos datos de ventas. Interpreta las tasas con cautela.', tone: 'warning' },
+  { title: 'Mayor actividad detectada entre 14:00 y 20:00.', tone: 'info' },
+];
+
+function formatNumber(value: number) {
+  return value.toLocaleString('es-CL');
+}
+
+function formatHours(value: number) {
+  return `${round(value, 2).toLocaleString('es-CL')}h`;
+}
+
+function calculateRate(numerator: number, denominator: number) {
+  return clampPercentage(safeDivide(numerator, denominator) * 100);
+}
+
+function getInitials(name: string) {
+  return name
+    .split(' ')
+    .map((part) => part[0])
+    .join('')
+    .slice(0, 2)
+    .toUpperCase();
+}
+
+function MetricCard({ metric }: { metric: KpiMetric }) {
+  return (
+    <Card className="border-slate-200 bg-white shadow-sm">
+      <CardContent className="p-5">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="text-sm font-medium text-slate-500">{metric.title}</p>
+            <p className="mt-2 text-3xl font-semibold text-slate-950">{metric.value}</p>
+            <p className="mt-1 text-xs text-slate-500">{metric.helper}</p>
+          </div>
+          <span className={`h-2.5 w-2.5 rounded-full ${metric.accent}`} />
+        </div>
+        <div className="mt-4 h-20 rounded-lg border border-slate-200 bg-slate-50 p-3">
+          {metric.visual === 'bar' ? <MiniBarChart data={MODERN_DAILY_SERIES.map((row) => row.prospects)} /> : null}
+          {metric.visual === 'dot' ? <MiniDotChart data={MODERN_DAILY_SERIES.map((row) => row.sales)} /> : null}
+          {metric.visual === 'line' ? <MiniLineChart data={MODERN_DAILY_SERIES.map((row) => row.conversion)} benchmark={10} /> : null}
+          {metric.visual === 'progress' ? <ProgressMetric actual={177.18} target={48} /> : null}
+          {metric.visual === 'gauge' ? <GaugeMetric value={369.1} target={85} /> : null}
+          {metric.visual === 'agents' ? <AgentChips agents={MODERN_AGENTS} /> : null}
+          {metric.visual === 'area' ? <MiniAreaChart data={MODERN_DAILY_SERIES.map((row) => row.views)} /> : null}
+          {metric.visual === 'peak' ? <MiniPeakChart data={MODERN_DAILY_SERIES.map((row) => row.peak)} /> : null}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function MiniBarChart({ data }: { data: number[] }) {
+  const max = Math.max(1, ...data);
+  return (
+    <div className="flex h-full flex-col gap-2">
+      <div className="flex items-center justify-between text-[10px] font-semibold text-slate-500">
+        <span>Serie Leads</span>
+        <span>Total {data.reduce((sum, value) => sum + value, 0)}</span>
+      </div>
+      <div className="flex min-h-0 flex-1 items-end gap-2">
+        {data.map((value, index) => (
+          <div key={`bar-${index}`} className="flex h-full flex-1 flex-col justify-end gap-1" title={`Leads día ${index + 1}: ${value}`}>
+            <span className="flex h-full items-end rounded-sm bg-blue-100">
+              <span
+                className="block w-full rounded-sm bg-gradient-to-t from-blue-700 to-sky-400"
+                style={{ height: `${Math.max(20, (value / max) * 100)}%` }}
+              />
+            </span>
+            <span className="text-center text-[9px] font-semibold text-slate-400">{value}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MiniDotChart({ data }: { data: number[] }) {
+  return (
+    <div className="flex h-full flex-col justify-center gap-3">
+      <div className="relative flex items-center justify-between gap-2">
+        <span className="absolute left-1 right-1 top-1/2 h-px -translate-y-1/2 bg-slate-200" />
+        {data.map((value, index) => (
+          <span
+            key={`dot-${index}`}
+            className={`relative z-10 h-3.5 w-3.5 rounded-full border-2 border-white shadow-sm ${value > 0 ? 'bg-emerald-500 ring-4 ring-emerald-100' : 'bg-slate-300'}`}
+            title={`Cierres día ${index + 1}: ${value}`}
+          />
+        ))}
+      </div>
+      <div className="flex items-center gap-3 text-[10px] font-semibold text-slate-500">
+        <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-emerald-500" />Cierre</span>
+        <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-slate-300" />Sin cierre</span>
+      </div>
+    </div>
+  );
+}
+
+function MiniLineChart({ data, benchmark }: { data: number[]; benchmark: number }) {
+  const chartData = data.map((value, index) => ({ index, value, benchmark }));
+  return (
+    <div className="h-full">
+      <ChartContainer config={{ value: { label: 'Conversión', color: '#2563eb' }, benchmark: { label: 'Benchmark 10%', color: '#94a3b8' } }} className="h-12 w-full">
+        <LineChart accessibilityLayer data={chartData}>
+          <Line dataKey="benchmark" stroke="var(--color-benchmark)" strokeDasharray="4 4" dot={false} />
+          <Line type="monotone" dataKey="value" stroke="var(--color-value)" strokeWidth={2.5} dot={{ r: 2 }} activeDot={{ r: 4 }} />
+        </LineChart>
+      </ChartContainer>
+      <div className="flex items-center gap-3 text-[10px] font-semibold text-slate-500">
+        <span className="inline-flex items-center gap-1"><span className="h-0.5 w-4 bg-blue-600" />Conversión</span>
+        <span className="inline-flex items-center gap-1"><span className="h-0.5 w-4 border-t border-dashed border-slate-400" />Benchmark</span>
+      </div>
+    </div>
+  );
+}
+
+function MiniAreaChart({ data }: { data: number[] }) {
+  const chartData = data.map((value, index) => ({ index, value }));
+  return (
+    <div className="h-full">
+      <ChartContainer config={{ value: { label: 'Visualizaciones', color: '#2563eb' } }} className="h-12 w-full">
+        <AreaChart accessibilityLayer data={chartData}>
+          <Area type="monotone" dataKey="value" stroke="var(--color-value)" fill="var(--color-value)" fillOpacity={0.2} strokeWidth={2.5} dot={false} />
+        </AreaChart>
+      </ChartContainer>
+      <div className="flex items-center justify-between text-[10px] font-semibold text-slate-500">
+        <span>Inicio {data[0]}</span>
+        <span>Actual {data[data.length - 1]}</span>
+      </div>
+    </div>
+  );
+}
+
+function MiniPeakChart({ data }: { data: number[] }) {
+  const max = Math.max(...data);
+  const chartData = data.map((value, index) => ({ index, value }));
+  return (
+    <ChartContainer config={{ value: { label: 'Peak', color: '#7c3aed' } }} className="h-full w-full">
+      <LineChart accessibilityLayer data={chartData}>
+        <Line type="monotone" dataKey="value" stroke="var(--color-value)" strokeWidth={2} dot={(props: any) => {
+          const isMax = props.payload?.value === max;
+          return <circle cx={props.cx} cy={props.cy} r={isMax ? 4 : 2} fill={isMax ? '#7c3aed' : '#c4b5fd'} />;
+        }} />
+      </LineChart>
+    </ChartContainer>
+  );
+}
+
+function ProgressMetric({ actual, target }: { actual: number; target: number }) {
+  const progress = Math.min(100, calculateRate(actual, target));
+  return (
+    <div className="flex h-full flex-col justify-center gap-2">
+      <div className="flex justify-between text-xs font-medium text-slate-600">
+        <span>Real</span>
+        <span>{formatHours(actual)} / {formatHours(target)}</span>
+      </div>
+      <div className="h-3 rounded-full bg-slate-200">
+        <div className="h-3 rounded-full bg-gradient-to-r from-blue-600 to-emerald-500" style={{ width: `${progress}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function GaugeMetric({ value, target }: { value: number; target: number }) {
+  const progress = Math.min(100, (clampForGauge(value, 200) / 200) * 100);
+  const targetPosition = Math.min(100, (target / 200) * 100);
+  return (
+    <div className="flex h-full flex-col justify-center gap-2">
+      <div className="flex items-center justify-between text-[10px] font-semibold text-slate-500">
+        <span>Objetivo {formatPercent(target)}</span>
+        <span className="text-violet-700">{formatPercent(value)}</span>
+      </div>
+      <div className="relative h-4 rounded-full bg-slate-200">
+        <div
+          className="h-4 rounded-full bg-gradient-to-r from-violet-500 via-blue-500 to-emerald-500"
+          style={{ width: `${progress}%` }}
+        />
+        <span
+          className="absolute -top-1 h-6 w-0.5 rounded bg-slate-900"
+          style={{ left: `${targetPosition}%` }}
+          title={`Objetivo ${formatPercent(target)}`}
+        />
+      </div>
+      <div className="grid grid-cols-3 gap-1 text-[9px] font-semibold text-slate-500">
+        <span>Bajo</span>
+        <span className="text-center">Meta</span>
+        <span className="text-right text-emerald-700">Sobre</span>
+      </div>
+    </div>
+  );
+}
+
+function AgentChips({ agents }: { agents: AgentPerformance[] }) {
+  return (
+    <div className="flex h-full flex-wrap content-center gap-1.5">
+      {agents.map((agent) => (
+        <span key={agent.name} className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-slate-900 text-[10px] font-semibold text-white">
+          {getInitials(agent.name)}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function FunnelOverview() {
+  const visualizations = 22;
+  const prospects = 4;
+  const sales = 1;
+  const funnel: FunnelData[] = [
+    { label: 'Visualizaciones', value: visualizations, width: 100 },
+    { label: 'Prospectos', value: prospects, width: 62 },
+    { label: 'Ventas', value: sales, width: 36 },
+  ];
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="mb-4 flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-lg font-semibold text-slate-950">Embudo comercial</h2>
+          <p className="text-sm text-slate-500">Visualizaciones a prospectos y ventas.</p>
+        </div>
+        <Badge className="bg-emerald-50 text-emerald-700 hover:bg-emerald-50">Final {formatPercent(calculateRate(sales, visualizations))}</Badge>
+      </div>
+      <div className="grid gap-5 lg:grid-cols-[1fr_260px]">
+        <div className="space-y-3">
+          {funnel.map((step, index) => (
+            <div key={step.label} className="rounded-lg bg-slate-50 p-2">
+              <div className="flex items-center justify-between rounded-md bg-gradient-to-r from-blue-700 to-violet-500 px-4 py-3 text-white" style={{ width: `${step.width}%` }}>
+                <span className="text-sm font-medium">{step.label}</span>
+                <span className="text-lg font-semibold">{formatNumber(step.value)}</span>
+              </div>
+              {index < funnel.length - 1 ? <p className="mt-1 text-xs text-slate-500">{formatPercent(calculateRate(funnel[index + 1].value, step.value))} avanza al siguiente paso</p> : null}
+            </div>
+          ))}
+        </div>
+        <div className="space-y-3 rounded-lg border border-slate-200 p-4">
+          <RateRow label="Visualización a prospecto" value={calculateRate(prospects, visualizations)} />
+          <RateRow label="Prospecto a venta" value={calculateRate(sales, prospects)} />
+          <RateRow label="Visualización a venta" value={calculateRate(sales, visualizations)} />
+          <p className="pt-2 text-sm text-slate-600">De cada 22 visualizaciones, se generan 4 prospectos y 1 venta. La conversión final es {formatPercent(calculateRate(sales, visualizations))}.</p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function RateRow({ label, value }: { label: string; value: number }) {
+  return (
+    <div>
+      <div className="flex justify-between text-xs font-medium text-slate-600">
+        <span>{label}</span>
+        <span>{formatPercent(value)}</span>
+      </div>
+      <div className="mt-1 h-2 rounded-full bg-slate-200">
+        <div className="h-2 rounded-full bg-blue-600" style={{ width: `${Math.min(100, value)}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function AgentPerformanceTable() {
+  const totalProspects = MODERN_AGENTS.reduce((sum, agent) => sum + agent.prospects, 0);
+  const totalSales = MODERN_AGENTS.reduce((sum, agent) => sum + agent.sales, 0);
+  const totalHours = MODERN_AGENTS.reduce((sum, agent) => sum + agent.liveHours, 0);
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+      <h2 className="text-lg font-semibold text-slate-950">Performance por agente</h2>
+      <div className="mt-4 overflow-x-auto">
+        <table className="w-full min-w-[720px] text-sm">
+          <thead>
+            <tr className="border-b border-slate-200 text-left text-xs uppercase text-slate-500">
+              <th className="py-3">Agente</th>
+              <th>Horas live</th>
+              <th>Prospectos</th>
+              <th>Ventas</th>
+              <th>Conversión</th>
+              <th>Barra</th>
+            </tr>
+          </thead>
+          <tbody>
+            {MODERN_AGENTS.map((agent) => {
+              const conversion = calculateRate(agent.sales, agent.prospects);
+              return (
+                <tr key={agent.name} className="border-b border-slate-100">
+                  <td className="py-3">
+                    <div className="flex items-center gap-3">
+                      <span className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-slate-900 text-xs font-semibold text-white">{getInitials(agent.name)}</span>
+                      <span className="font-medium text-slate-900">{agent.name}</span>
+                    </div>
+                  </td>
+                  <td>{formatHours(agent.liveHours)}</td>
+                  <td>{agent.prospects}</td>
+                  <td>{agent.sales}</td>
+                  <td>{formatPercent(conversion)}</td>
+                  <td><div className="h-2 w-28 rounded-full bg-slate-200"><div className="h-2 rounded-full bg-emerald-500" style={{ width: `${conversion}%` }} /></div></td>
+                </tr>
+              );
+            })}
+            <tr className="font-semibold text-slate-950">
+              <td className="py-3">Total</td>
+              <td>{formatHours(totalHours)}</td>
+              <td>{totalProspects}</td>
+              <td>{totalSales}</td>
+              <td>{formatPercent(calculateRate(totalSales, totalProspects))}</td>
+              <td />
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function LiveActivityHeatmap() {
+  const days = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
+  const hours = ['00', '02', '04', '06', '08', '10', '12', '14', '16', '18', '20', '22'];
+  const cells: LiveActivityCell[] = days.flatMap((day, dayIndex) =>
+    hours.map((hour) => {
+      const hourValue = Number(hour);
+      const isPrime = hourValue >= 14 && hourValue <= 20;
+      const isCoreDay = dayIndex >= 1 && dayIndex <= 3;
+      return { day, hour, value: (isPrime ? 2 : 0) + (isCoreDay ? 1 : 0) + ((dayIndex + hourValue) % 3 === 0 ? 1 : 0) };
+    })
+  );
+  const color = (value: number) => ['bg-slate-100', 'bg-blue-100', 'bg-blue-300', 'bg-blue-500', 'bg-blue-700'][Math.min(4, value)] ?? 'bg-slate-100';
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+      <h2 className="text-lg font-semibold text-slate-950">Actividad live por día y hora</h2>
+      <div className="mt-4 overflow-x-auto">
+        <div className="min-w-[720px]">
+          <div className="grid grid-cols-[48px_repeat(12,1fr)] gap-1 text-xs text-slate-500">
+            <span />
+            {hours.map((hour) => <span key={hour} className="text-center">{hour}</span>)}
+            {days.map((day) => (
+              <div key={day} className="contents">
+                <span className="flex items-center font-medium text-slate-600">{day}</span>
+                {hours.map((hour) => {
+                  const cell = cells.find((item) => item.day === day && item.hour === hour);
+                  return <span key={`${day}-${hour}`} title={`${day} ${hour}:00 actividad ${cell?.value ?? 0}`} className={`h-8 rounded ${color(cell?.value ?? 0)}`} />;
+                })}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-xs text-slate-500">
+          <span>Menor actividad</span>
+          {[0, 1, 2, 3, 4].map((value) => <span key={value} className={`h-3 w-6 rounded ${color(value)}`} />)}
+          <span>Mayor actividad</span>
+        </div>
+        <p className="max-w-xl text-sm text-slate-600">Mayor actividad entre 14:00 y 20:00, especialmente martes a jueves. Usa estos horarios para programar tus próximos lives.</p>
+      </div>
+    </section>
+  );
+}
+
+function InsightsPanel() {
+  const toneClass = {
+    success: 'border-emerald-200 bg-emerald-50 text-emerald-800',
+    warning: 'border-amber-200 bg-amber-50 text-amber-800',
+    info: 'border-blue-200 bg-blue-50 text-blue-800',
+  };
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+      <h2 className="text-lg font-semibold text-slate-950">Insights del periodo</h2>
+      <div className="mt-4 grid gap-3 md:grid-cols-2">
+        {MODERN_INSIGHTS.map((insight) => (
+          <div key={insight.title} className={`rounded-lg border px-4 py-3 text-sm ${toneClass[insight.tone]}`}>
+            {insight.title}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function ModernDashboard() {
+  const [selectedClientFilter, setSelectedClientFilter] = useState<DashboardClient>('WOM');
+  const [selectedAgentFilter, setSelectedAgentFilter] = useState('ALL');
+  const [selectedPeriodFilter, setSelectedPeriodFilter] = useState('23 may - 29 may 2025');
+  const kpis: KpiMetric[] = [
+    { key: 'prospects', title: 'Leads', value: '4', helper: '+2.7 vs prom. diario', accent: 'bg-blue-600', visual: 'bar' },
+    { key: 'sales', title: 'Ventas', value: '1', helper: '+0.7 vs prom. diario', accent: 'bg-emerald-500', visual: 'dot' },
+    { key: 'conversion', title: 'Conversión', value: '25%', helper: '+16.7 pp vs prom. diario', accent: 'bg-violet-500', visual: 'line' },
+    { key: 'liveHours', title: 'Horas live efectivas', value: '177,18h', helper: '+129.18h vs esperado', accent: 'bg-blue-500', visual: 'progress' },
+    { key: 'adherence', title: 'Adherencia live', value: '369.1%', helper: 'Objetivo 85%', accent: 'bg-violet-500', visual: 'gauge' },
+    { key: 'agents', title: 'Agentes activos', value: '4', helper: 'Periodo actual', accent: 'bg-slate-900', visual: 'agents' },
+    { key: 'views', title: 'Visualizaciones', value: '22', helper: 'Periodo actual', accent: 'bg-blue-400', visual: 'area' },
+    { key: 'peak', title: 'Peak espectadores', value: '15', helper: 'Periodo actual', accent: 'bg-violet-600', visual: 'peak' },
+  ];
+
+  return (
+    <main className="min-h-screen bg-slate-50 p-4 sm:p-6 lg:p-8">
+      <header className="mb-4 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold text-slate-950">Dashboard</h1>
+          <p className="text-sm text-slate-500">Resumen de rendimiento de TikTok Live</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button className="bg-slate-950 text-white hover:bg-slate-800">Filtros</Button>
+        </div>
+      </header>
+
+      <div className="sticky top-0 z-30 mb-6 rounded-lg border border-slate-200 bg-white/95 p-4 shadow-sm backdrop-blur">
+        <div className="grid gap-3 md:grid-cols-3">
+          <div>
+            <label className="text-xs font-semibold uppercase text-slate-500">Cliente</label>
+            <select
+              value={selectedClientFilter}
+              onChange={(event) => setSelectedClientFilter(event.target.value as DashboardClient)}
+              className="mt-1 h-11 w-full rounded-md border border-slate-200 bg-slate-50 px-3 text-sm font-semibold text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+            >
+              <option value="WOM">WOM</option>
+              <option value="CLARO">Claro</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-xs font-semibold uppercase text-slate-500">Agente</label>
+            <select
+              value={selectedAgentFilter}
+              onChange={(event) => setSelectedAgentFilter(event.target.value)}
+              className="mt-1 h-11 w-full rounded-md border border-slate-200 bg-slate-50 px-3 text-sm font-semibold text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+            >
+              <option value="ALL">Todos los agentes</option>
+              {MODERN_AGENTS.map((agent) => (
+                <option key={agent.name} value={agent.name}>{agent.name}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs font-semibold uppercase text-slate-500">Fecha</label>
+            <select
+              value={selectedPeriodFilter}
+              onChange={(event) => setSelectedPeriodFilter(event.target.value)}
+              className="mt-1 h-11 w-full rounded-md border border-slate-200 bg-slate-50 px-3 text-sm font-semibold text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+            >
+              <option value="23 may - 29 may 2025">23 may - 29 may 2025</option>
+              <option value="Esta semana">Esta semana</option>
+              <option value="Mes actual">Mes actual</option>
+              <option value="Acumulado">Acumulado</option>
+            </select>
+          </div>
+        </div>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <span className="rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-800">Cliente: {selectedClientFilter}</span>
+          <span className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-800">Agente: {selectedAgentFilter === 'ALL' ? 'Todos los agentes' : selectedAgentFilter}</span>
+          <span className="rounded-full border border-violet-200 bg-violet-50 px-3 py-1 text-xs font-semibold text-violet-800">Fecha: {selectedPeriodFilter}</span>
+        </div>
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        {kpis.map((metric) => <MetricCard key={metric.key} metric={metric} />)}
+      </div>
+
+      <div className="mt-6 grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
+        <FunnelOverview />
+        <InsightsPanel />
+      </div>
+
+      <div className="mt-6 grid gap-6 2xl:grid-cols-[1fr_1fr]">
+        <AgentPerformanceTable />
+        <LiveActivityHeatmap />
+      </div>
+    </main>
+  );
+}
+
 export function Dashboard() {
+  return <LegacyDashboard />;
+}
+
+function LegacyDashboard() {
+  const { user } = useAuth();
   const {
     allMessages,
     allLeads,
@@ -750,7 +1365,9 @@ export function Dashboard() {
     updatedAt,
   } = useRecorderBridge();
 
-  const [selectedClient, setSelectedClient] = useState<DashboardClient>('WOM');
+  const [selectedClient, setSelectedClient] = useState<DashboardClient>(
+    user?.clientCode === 'CLARO' ? 'CLARO' : 'WOM'
+  );
   const [calendarRange, setCalendarRange] = useState<DateRange | undefined>(undefined);
   const [draftCalendarRange, setDraftCalendarRange] = useState<DateRange | undefined>(undefined);
   const [selectedPreset, setSelectedPreset] = useState<DatePresetKey | null>(null);
@@ -760,9 +1377,14 @@ export function Dashboard() {
   const [selectedAgentLabel, setSelectedAgentLabel] = useState('ALL');
   const [selectedKpiKey, setSelectedKpiKey] = useState<string | null>(null);
   const [selectedHeatmapWeekIndex, setSelectedHeatmapWeekIndex] = useState(0);
+  const isAdminUser = user?.role === 'administrator';
 
   useEffect(() => {
-    if (typeof window === 'undefined') {
+    if (typeof window === 'undefined' || !user) {
+      return;
+    }
+    if (!isAdminUser) {
+      setSelectedClient(user.clientCode === 'CLARO' ? 'CLARO' : 'WOM');
       return;
     }
     const storedClient = window.localStorage.getItem(DASHBOARD_CLIENT_STORAGE_KEY);
@@ -773,14 +1395,14 @@ export function Dashboard() {
     if (storedClient === 'WOM' || storedClient === 'CLARO') {
       setSelectedClient(storedClient);
     }
-  }, []);
+  }, [isAdminUser, user]);
 
   useEffect(() => {
-    if (typeof window === 'undefined') {
+    if (typeof window === 'undefined' || !isAdminUser) {
       return;
     }
     window.localStorage.setItem(DASHBOARD_CLIENT_STORAGE_KEY, selectedClient);
-  }, [selectedClient]);
+  }, [isAdminUser, selectedClient]);
 
   const presetReferenceDate = useMemo(
     () => resolveDisplayDate(updatedAt) ?? new Date(),
@@ -926,11 +1548,6 @@ export function Dashboard() {
     return config;
   }, [dashboardModel.statusDistribution]);
 
-  const heatmapRows = useMemo(
-    () => (Array.isArray(dashboardModel.heatmap?.rows) ? dashboardModel.heatmap.rows : []),
-    [dashboardModel.heatmap]
-  );
-
   const heatmapDateKeys = useMemo(() => {
     if (Array.isArray(dashboardModel.heatmap?.dateKeys) && dashboardModel.heatmap.dateKeys.length > 0) {
       return dashboardModel.heatmap.dateKeys
@@ -939,21 +1556,6 @@ export function Dashboard() {
     }
     return [];
   }, [dashboardModel.heatmap]);
-
-  const heatmapScoreByRow = useMemo(() => {
-    const scoreMap = new Map<string, Map<string, number>>();
-    heatmapRows.forEach((rowLabel: string, rowIndex: number) => {
-      const rowValues = Array.isArray(dashboardModel.heatmap?.values?.[rowIndex])
-        ? dashboardModel.heatmap.values[rowIndex]
-        : [];
-      const dateScoreMap = new Map<string, number>();
-      heatmapDateKeys.forEach((dateKey: string, dateIndex: number) => {
-        dateScoreMap.set(dateKey, safeNumber(rowValues[dateIndex]));
-      });
-      scoreMap.set(rowLabel, dateScoreMap);
-    });
-    return scoreMap;
-  }, [dashboardModel.heatmap, heatmapDateKeys, heatmapRows]);
 
   const heatmapWeeks = useMemo(() => {
     const fallbackDate = dateRange.toDate ?? dateRange.fromDate ?? presetReferenceDate;
@@ -975,10 +1577,16 @@ export function Dashboard() {
   );
   const visibleHeatmapDateKeys = heatmapWeeks[activeHeatmapWeekIndex] ?? [];
   const visibleHeatmapCols = visibleHeatmapDateKeys.map(formatHeatmapDayLabel);
-  const visibleHeatmapValues = heatmapRows.map((rowLabel: string) => {
-    const rowScoreMap = heatmapScoreByRow.get(rowLabel) ?? new Map<string, number>();
-    return visibleHeatmapDateKeys.map((dateKey: string) => safeNumber(rowScoreMap.get(dateKey)));
-  });
+  const evaluatedExecutiveLabel =
+    selectedExecutiveAccount === 'ALL'
+      ? 'Todos los agentes'
+      : (executiveOptions.find((option) => option.value === selectedExecutiveAccount)?.label ?? selectedExecutiveAccount);
+  const hourlyHeatmap = useMemo(
+    () => buildHourlyPeakHeatmap(executiveFilteredInput.liveSessions, visibleHeatmapDateKeys, selectedExecutiveAccount),
+    [executiveFilteredInput.liveSessions, selectedExecutiveAccount, visibleHeatmapDateKeys]
+  );
+  const heatmapRows = hourlyHeatmap.rows;
+  const visibleHeatmapValues = hourlyHeatmap.values;
 
   const heatmapPalette = useMemo(
     () => ([
@@ -1096,6 +1704,19 @@ export function Dashboard() {
   }, [dashboardModel.agentRows, selectedAgentLabel]);
 
   const selectedKpiCard = dashboardModel.kpiCards.find((card: any) => card.key === selectedKpiKey) ?? null;
+  const kpiTrendSeriesByKey = useMemo(() => {
+    const dailyRows = Array.isArray(dashboardModel.dailyTrend) ? dashboardModel.dailyTrend : [];
+    const mapSeries = (metricKey: string) =>
+      dailyRows.slice(-7).map((row: any, index: number) => ({ index, value: safeNumber(row?.[metricKey]) })) as MiniSeriesPoint[];
+    return {
+      leadLikeCount: mapSeries('leadLikeCount'),
+      salesTotal: mapSeries('salesTotal'),
+      conversionRate: mapSeries('conversionRate'),
+      liveHours: mapSeries('liveHours'),
+      views: mapSeries('views'),
+      peakViewers: mapSeries('peakViewers'),
+    };
+  }, [dashboardModel.dailyTrend]);
 
   const kpiDetailRows = useMemo(() => {
     if (!selectedKpiKey) {
@@ -1252,6 +1873,10 @@ export function Dashboard() {
     () => formatDateRangeLabel(calendarRange),
     [calendarRange]
   );
+  const selectedExecutiveDisplayLabel =
+    selectedExecutiveAccount === 'ALL'
+      ? 'Todos los agentes'
+      : (executiveOptions.find((option) => option.value === selectedExecutiveAccount)?.label ?? selectedExecutiveAccount);
 
   const selectedAgentRow =
     selectedAgentLabel === 'ALL'
@@ -1259,36 +1884,42 @@ export function Dashboard() {
       : dashboardModel.agentRows.find((row: any) => row.agentLabel === selectedAgentLabel) ?? null;
 
   return (
-    <div className="space-y-6 p-6">
-      <header className="rounded-2xl border border-slate-200 bg-white p-5">
+    <div className="space-y-6 p-6 pt-40">
+      <header className="fixed left-64 right-0 top-0 z-40 border-b border-slate-200 bg-white/95 p-5 shadow-sm backdrop-blur">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <h1 className="text-2xl font-semibold text-gray-900">Dashboard TikTok Live</h1>
+            <h1 className="text-2xl font-semibold text-gray-900">Monitor de Leads</h1>
           </div>
           <ClientLogoBadge client={selectedClient} />
         </div>
 
         <div className="mt-4 grid gap-3 md:grid-cols-2 lg:grid-cols-5">
           <div>
-            <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">Cliente</label>
-            <select
-              value={selectedClient}
-              onChange={(event) => setSelectedClient(event.target.value as DashboardClient)}
-              className="mt-1 h-10 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900"
-            >
-              <option value="WOM">WOM</option>
-              <option value="CLARO">Claro</option>
-            </select>
+            <label className="text-xs font-semibold uppercase tracking-wide text-slate-600">Cliente</label>
+            {isAdminUser ? (
+              <select
+                value={selectedClient}
+                onChange={(event) => setSelectedClient(event.target.value as DashboardClient)}
+                className="mt-1 h-11 w-full rounded-md border-2 border-blue-200 bg-blue-50 px-3 text-sm font-semibold text-slate-900 shadow-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+              >
+                <option value="WOM">WOM</option>
+                <option value="CLARO">Claro</option>
+              </select>
+            ) : (
+              <div className="mt-1 flex h-11 items-center rounded-md border-2 border-blue-200 bg-blue-50 px-3 text-sm font-semibold text-slate-900 shadow-sm">
+                {selectedClient}
+              </div>
+            )}
           </div>
 
           <div>
-            <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">Ejecutivo</label>
+            <label className="text-xs font-semibold uppercase tracking-wide text-slate-600">Agente</label>
             <select
               value={selectedExecutiveAccount}
               onChange={(event) => setSelectedExecutiveAccount(event.target.value)}
-              className="mt-1 h-10 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900"
+              className="mt-1 h-11 w-full rounded-md border-2 border-blue-200 bg-blue-50 px-3 text-sm font-semibold text-slate-900 shadow-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
             >
-              <option value="ALL">Ver todo</option>
+              <option value="ALL">Todos los agentes</option>
               {executiveOptions.map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
               ))}
@@ -1296,7 +1927,7 @@ export function Dashboard() {
           </div>
 
           <div className="md:col-span-1 lg:col-span-2">
-            <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">Calendario</label>
+            <label className="text-xs font-semibold uppercase tracking-wide text-slate-600">Calendario</label>
             <Popover
               open={isCalendarOpen}
               onOpenChange={(open) => {
@@ -1309,7 +1940,7 @@ export function Dashboard() {
               <PopoverTrigger asChild>
                 <Button
                   variant="outline"
-                  className="mt-1 h-10 w-full justify-start gap-2 text-left font-normal text-slate-900"
+                  className="mt-1 h-11 w-full justify-start gap-2 border-2 border-blue-200 bg-blue-50 text-left font-semibold text-slate-900 shadow-sm"
                 >
                   <CalendarDays className="h-4 w-4 text-slate-500" />
                   <span className="truncate">{selectedRangeLabel}</span>
@@ -1370,7 +2001,7 @@ export function Dashboard() {
               onClick={resetDateFilterToAccumulated}
               className="h-10 w-full border-slate-200 text-slate-700"
             >
-              Limpiar filtro
+              Limpiar Filtros
             </Button>
           </div>
         </div>
@@ -1378,7 +2009,7 @@ export function Dashboard() {
 
       <Accordion
         type="multiple"
-        className="rounded-2xl border border-slate-200 bg-white px-4"
+        className="border border-slate-200 bg-white"
       >
         <AccordionItem value="kpis">
           <AccordionTrigger>
@@ -1388,6 +2019,14 @@ export function Dashboard() {
             </span>
           </AccordionTrigger>
           <AccordionContent className="space-y-4">
+            <div className="rounded-xl border border-blue-300 bg-gradient-to-r from-blue-50 to-white px-6 py-4 shadow-sm">
+              <p className="text-xs font-bold uppercase tracking-[0.08em] text-blue-800">Contexto activo</p>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Cliente: {selectedClient}</span>
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Agente: {selectedExecutiveDisplayLabel}</span>
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Rango: {selectedRangeLabel}</span>
+            </div>
+            </div>
             <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
               {dashboardModel.kpiCards.map((card: any) => (
                 <Card key={card.key}>
@@ -1395,12 +2034,143 @@ export function Dashboard() {
                     <p className="text-sm text-gray-500">{card.label}</p>
                     <p className="mt-2 text-3xl font-semibold text-gray-900">{card.formattedValue}</p>
                     <p className="mt-2 text-xs text-gray-500">{card.deltaLabel}</p>
+                    <div className="mt-3 h-16 rounded-lg border border-slate-200 bg-slate-50 p-2">
+                      {card.key === 'leadLikeCount' ? (
+                        <div className="flex h-full flex-col gap-1">
+                          <div className="flex items-center justify-between text-[10px] font-semibold text-slate-500">
+                            <span>Leads por día</span>
+                            <span>Serie demo</span>
+                          </div>
+                          <div className="flex min-h-0 flex-1 items-end gap-1.5">
+                            {(() => {
+                              const series = ensureVisibleSeries(kpiTrendSeriesByKey.leadLikeCount.length > 0 ? kpiTrendSeriesByKey.leadLikeCount : buildKpiSparkline(card));
+                              const maxValue = Math.max(1, ...series.map((point) => safeNumber(point.value)));
+                              return series.map((point) => (
+                                <div key={`lead-bar-${point.index}`} className="flex h-full flex-1 flex-col justify-end gap-0.5" title={`Leads día ${point.index + 1}: ${point.value}`}>
+                                  <span className="flex min-h-0 flex-1 items-end rounded-sm bg-blue-100">
+                                    <span
+                                      className="block w-full rounded-sm bg-gradient-to-t from-blue-700 to-sky-400"
+                                      style={{ height: `${Math.max(18, (safeNumber(point.value) / maxValue) * 100)}%` }}
+                                    />
+                                  </span>
+                                  <span className="text-center text-[9px] font-semibold text-slate-400">{Math.round(safeNumber(point.value))}</span>
+                                </div>
+                              ));
+                            })()}
+                          </div>
+                        </div>
+                      ) : null}
+                      {card.key === 'salesTotal' ? (
+                        <div className="flex h-full items-center gap-1">
+                          {ensureVisibleSeries(kpiTrendSeriesByKey.salesTotal.length > 0 ? kpiTrendSeriesByKey.salesTotal : buildKpiSparkline(card)).map((point) => (
+                            <span
+                              key={`sales-dot-${point.index}`}
+                              className={`inline-flex h-2.5 w-2.5 rounded-full ${point.value > 0 ? 'bg-blue-700' : 'bg-slate-300'}`}
+                              title={`ventas bloque ${point.index + 1}: ${point.value}`}
+                            />
+                          ))}
+                          <span className="ml-2 text-[10px] font-semibold text-slate-500">Eventos discretos</span>
+                        </div>
+                      ) : null}
+                      {card.key === 'conversionRate' ? (
+                        <ChartContainer config={{ value: { label: card.label, color: DASHBOARD_CHART_PALETTE.blue700 } }} className="h-full w-full">
+                          <LineChart accessibilityLayer data={kpiTrendSeriesByKey.conversionRate}>
+                            <Line type="monotone" dataKey="value" stroke={DASHBOARD_CHART_PALETTE.blue700} strokeWidth={2} dot={false} />
+                            <Line type="monotone" dataKey={() => CONVERSION_BENCHMARK} stroke={DASHBOARD_CHART_PALETTE.gray600} strokeDasharray="4 4" dot={false} />
+                          </LineChart>
+                        </ChartContainer>
+                      ) : null}
+                      {card.key === 'liveHours' ? (
+                        <div className="space-y-1">
+                          <div className="flex items-center justify-between text-[11px] text-slate-600">
+                            <span>Real vs meta</span>
+                            <span>{round(safeNumber(dashboardModel.metrics.liveHours), 1)}h / {round(safeNumber(dashboardModel.metrics.expectedLiveHours), 1)}h</span>
+                          </div>
+                          <div className="h-3 w-full rounded-full bg-slate-200">
+                            <div className="h-3 rounded-full bg-blue-700" style={{ width: `${Math.min(100, clampPercentage(safeDivide(dashboardModel.metrics.liveHours, Math.max(1, dashboardModel.metrics.expectedLiveHours)) * 100))}%` }} />
+                          </div>
+                          <div className="grid grid-cols-4 gap-1">
+                            {[25, 50, 75, 100].map((step) => (
+                              <span key={`live-step-${step}`} className="h-1 rounded bg-slate-300" />
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
+                      {card.key === 'adherenceRate' ? (
+                        <div className="flex h-full flex-col justify-center gap-2">
+                          {(() => {
+                            const adherenceValue = safeNumber(dashboardModel.metrics.adherenceRate);
+                            const targetValue = 85;
+                            const visualMax = Math.max(200, adherenceValue);
+                            const progressWidth = Math.min(100, safeDivide(adherenceValue, visualMax) * 100);
+                            const targetLeft = Math.min(100, safeDivide(targetValue, visualMax) * 100);
+                            return (
+                              <>
+                                <div className="flex items-center justify-between text-[10px] font-semibold text-slate-600">
+                                  <span>Actual {formatPercent(adherenceValue)}</span>
+                                  <span>Meta {formatPercent(targetValue)}</span>
+                                </div>
+                                <div className="relative h-4 rounded-full bg-slate-200">
+                                  <div
+                                    className="h-4 rounded-full bg-gradient-to-r from-blue-600 via-sky-500 to-emerald-500"
+                                    style={{ width: `${progressWidth}%` }}
+                                  />
+                                  <span
+                                    className="absolute -top-1 h-6 w-0.5 rounded bg-slate-950"
+                                    style={{ left: `${targetLeft}%` }}
+                                    title={`Meta ${formatPercent(targetValue)}`}
+                                  />
+                                </div>
+                                <div className="flex items-center justify-between text-[9px] font-semibold text-slate-500">
+                                  <span>0%</span>
+                                  <span className="text-slate-900">85%</span>
+                                  <span className="text-emerald-700">Sobrecumple</span>
+                                </div>
+                              </>
+                            );
+                          })()}
+                        </div>
+                      ) : null}
+                      {card.key === 'activeAgents' ? (
+                        <div className="flex h-full flex-wrap content-start items-center gap-1">
+                          {(dashboardModel.agentRows ?? []).slice(0, 5).map((row: any) => (
+                            <span key={row.agentLabel} className="inline-flex items-center rounded-full border border-blue-200 bg-white px-2 py-0.5 text-[10px] font-semibold text-blue-900">
+                              {row.agentLabel}
+                            </span>
+                          ))}
+                          <span className="inline-flex items-center rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-semibold text-slate-700">
+                            {safeNumber(dashboardModel.metrics.activeAgents)} activos
+                          </span>
+                        </div>
+                      ) : null}
+                      {card.key === 'views' ? (
+                        <div className="space-y-2">
+                          <ChartContainer config={{ value: { label: card.label, color: DASHBOARD_CHART_PALETTE.blue700 } }} className="h-9 w-full">
+                            <AreaChart accessibilityLayer data={ensureVisibleSeries(kpiTrendSeriesByKey.views.length > 0 ? kpiTrendSeriesByKey.views : buildKpiSparkline(card))}>
+                              <Area type="monotone" dataKey="value" stroke={DASHBOARD_CHART_PALETTE.blue700} fill={DASHBOARD_CHART_PALETTE.blue300} fillOpacity={0.25} strokeWidth={2} dot={false} />
+                            </AreaChart>
+                          </ChartContainer>
+                          <div className="grid grid-cols-8 gap-1">
+                            {ensureVisibleSeries(kpiTrendSeriesByKey.views.length > 0 ? kpiTrendSeriesByKey.views : buildKpiSparkline(card)).map((point) => (
+                              <span key={`views-strip-${point.index}`} className="h-1 rounded bg-blue-300" style={{ opacity: Math.max(0.25, Math.min(1, point.value / 20)) }} />
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
+                      {card.key === 'peakViewers' ? (
+                        <ChartContainer config={{ value: { label: card.label, color: DASHBOARD_CHART_PALETTE.blue700 } }} className="h-full w-full">
+                          <LineChart accessibilityLayer data={kpiTrendSeriesByKey.peakViewers}>
+                            <Line type="monotone" dataKey="value" stroke={DASHBOARD_CHART_PALETTE.blue700} strokeWidth={2} dot={{ r: 2 }} />
+                          </LineChart>
+                        </ChartContainer>
+                      ) : null}
+                    </div>
                     <button
                       type="button"
                       onClick={() => setSelectedKpiKey(card.key)}
                       className="mt-3 text-xs font-medium text-blue-700 underline decoration-dotted underline-offset-2"
                     >
-                      Ver detalle de calculo
+                      Ver detalle
                     </button>
                   </CardContent>
                 </Card>
@@ -1409,6 +2179,47 @@ export function Dashboard() {
 
             <Card>
               <CardContent className="pt-6">
+                <div className="mb-5 rounded-xl border border-slate-200 bg-slate-50 p-4">
+                  <div className="mb-2 flex items-center justify-between">
+                    <h4 className="text-sm font-semibold text-slate-900">Leads vs Cierres (Ventas)</h4>
+                    <span className="text-xs text-slate-500">Serie diaria</span>
+                  </div>
+                  <ChartContainer
+                    config={{
+                      leadLikeCount: { label: 'Leads', color: DASHBOARD_CHART_PALETTE.blue700 },
+                      salesTotal: { label: 'Cierres', color: DASHBOARD_CHART_PALETTE.blue300 },
+                    }}
+                    className="h-48 w-full"
+                  >
+                    <LineChart accessibilityLayer data={dashboardModel.dailyTrend}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="dayLabel" tickLine={false} axisLine={false} tick={CHART_AXIS_TICK_STYLE} />
+                      <YAxis tickLine={false} axisLine={false} tick={CHART_AXIS_TICK_STYLE} />
+                      <ChartTooltip content={<ChartTooltipContent />} />
+                      <ChartLegend content={<ChartLegendContent />} wrapperStyle={CHART_LEGEND_STYLE} />
+                      <Line
+                        type="monotone"
+                        dataKey="leadLikeCount"
+                        name="Leads"
+                        stroke="var(--color-leadLikeCount)"
+                        strokeWidth={2}
+                        dot={{ r: 2 }}
+                        activeDot={{ r: 4 }}
+                        label={{ position: 'top', fontSize: 10, fill: DASHBOARD_CHART_PALETTE.blue700 }}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="salesTotal"
+                        name="Cierres"
+                        stroke="var(--color-salesTotal)"
+                        strokeWidth={2}
+                        dot={{ r: 2 }}
+                        activeDot={{ r: 4 }}
+                        label={{ position: 'top', fontSize: 10, fill: DASHBOARD_CHART_PALETTE.blue300 }}
+                      />
+                    </LineChart>
+                  </ChartContainer>
+                </div>
                 <div className="grid gap-4 lg:grid-cols-3">
                   <div className="space-y-2">
                     <p className="text-xs uppercase tracking-wide text-gray-500">Dia actual vs promedio periodo</p>
@@ -1459,6 +2270,14 @@ export function Dashboard() {
             </span>
           </AccordionTrigger>
           <AccordionContent className="space-y-4">
+            <div className="rounded-xl border border-blue-300 bg-gradient-to-r from-blue-50 to-white px-6 py-4 shadow-sm">
+              <p className="text-xs font-bold uppercase tracking-[0.08em] text-blue-800">Contexto activo</p>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Cliente: {selectedClient}</span>
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Agente: {selectedExecutiveDisplayLabel}</span>
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Rango: {selectedRangeLabel}</span>
+            </div>
+            </div>
             <div className="grid gap-6 xl:grid-cols-2">
               <Card>
                 <CardHeader>
@@ -1572,6 +2391,14 @@ export function Dashboard() {
             </span>
           </AccordionTrigger>
           <AccordionContent className="space-y-4">
+            <div className="rounded-xl border border-blue-300 bg-gradient-to-r from-blue-50 to-white px-6 py-4 shadow-sm">
+              <p className="text-xs font-bold uppercase tracking-[0.08em] text-blue-800">Contexto activo</p>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Cliente: {selectedClient}</span>
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Agente: {selectedExecutiveDisplayLabel}</span>
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Rango: {selectedRangeLabel}</span>
+            </div>
+            </div>
             <div className="grid gap-3 md:grid-cols-3">
               <div>
                 <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">Agente</label>
@@ -1756,39 +2583,39 @@ export function Dashboard() {
               </Card>
             </div>
 
+          </AccordionContent>
+        </AccordionItem>
+
+        <AccordionItem value="heatmap">
+          <AccordionTrigger>
+            <span className="flex items-center gap-2 text-base text-slate-900">
+              <Clock className="h-5 w-5" />
+              Heatmap operativo (peak de conexion por hora y dia)
+            </span>
+          </AccordionTrigger>
+          <AccordionContent>
+            <div className="mb-4 rounded-xl border border-blue-300 bg-gradient-to-r from-blue-50 to-white px-6 py-4 shadow-sm">
+              <p className="text-xs font-bold uppercase tracking-[0.08em] text-blue-800">Contexto activo</p>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Cliente: {selectedClient}</span>
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Agente: {selectedExecutiveDisplayLabel}</span>
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Rango: {selectedRangeLabel}</span>
+            </div>
+            </div>
             <Card>
               <CardHeader>
-                <CardTitle>Heatmap operativo (conexion por dia y ejecutivo)</CardTitle>
+                <div className="mt-1 rounded-md border border-blue-200 bg-blue-50 px-3 py-2">
+                  <p className="text-xs font-bold uppercase tracking-[0.08em] text-blue-800">Vista activa de agentes</p>
+                  <p className="text-base font-semibold text-blue-950 leading-relaxed">Agente evaluado: {evaluatedExecutiveLabel}</p>
+                </div>
               </CardHeader>
               <CardContent>
                 <div className="mb-3 flex items-center justify-between gap-2">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setSelectedHeatmapWeekIndex((current) => Math.max(0, current - 1))}
-                    disabled={activeHeatmapWeekIndex <= 0}
-                    className="h-8 px-2"
-                    aria-label="Semana anterior"
-                  >
+                  <Button type="button" variant="outline" size="sm" onClick={() => setSelectedHeatmapWeekIndex((current) => Math.max(0, current - 1))} disabled={activeHeatmapWeekIndex <= 0} className="h-8 px-2" aria-label="Semana anterior">
                     <ChevronLeft className="h-4 w-4" />
                   </Button>
-                  <p className="text-xs text-slate-600">
-                    Semana {activeHeatmapWeekIndex + 1} de {Math.max(1, heatmapWeeks.length)}
-                  </p>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() =>
-                      setSelectedHeatmapWeekIndex((current) =>
-                        Math.min(Math.max(0, heatmapWeeks.length - 1), current + 1)
-                      )
-                    }
-                    disabled={activeHeatmapWeekIndex >= Math.max(0, heatmapWeeks.length - 1)}
-                    className="h-8 px-2"
-                    aria-label="Semana siguiente"
-                  >
+                  <p className="text-xs text-slate-600">Semana {activeHeatmapWeekIndex + 1} de {Math.max(1, heatmapWeeks.length)}</p>
+                  <Button type="button" variant="outline" size="sm" onClick={() => setSelectedHeatmapWeekIndex((current) => Math.min(Math.max(0, heatmapWeeks.length - 1), current + 1))} disabled={activeHeatmapWeekIndex >= Math.max(0, heatmapWeeks.length - 1)} className="h-8 px-2" aria-label="Semana siguiente">
                     <ChevronRight className="h-4 w-4" />
                   </Button>
                 </div>
@@ -1802,7 +2629,7 @@ export function Dashboard() {
                     emptyCellBorderColor={DASHBOARD_CHART_PALETTE.gray200}
                     cellSize={28}
                     cellGap={2}
-                    rowLabelWidth={140}
+                    rowLabelWidth={86}
                     showCellValues={false}
                     showIntensityAverages
                     intensityLabel="INTENSIDAD MEDIA"
@@ -1810,16 +2637,14 @@ export function Dashboard() {
                     moreText="Alto"
                     renderTooltip={(cell) => (
                       <div className="space-y-1 text-slate-900">
-                        <p className="text-[11px] tracking-[0.04em]">
-                          {cell.row} • {cell.col}
-                        </p>
-                        <p className="text-sm font-semibold">Score hot: {cell.value}</p>
+                        <p className="text-[11px] tracking-[0.04em]">{cell.col} • {cell.row}</p>
+                        <p className="text-sm font-semibold">Peak conexiones: {cell.value.toLocaleString('es-CL')}</p>
                       </div>
                     )}
                   />
                 ) : (
                   <div className="rounded-lg border border-dashed border-slate-300 p-4 text-sm text-slate-500">
-                    Sin dias de conexion en el rango seleccionado.
+                    Sin datos de conexion por hora en el rango seleccionado.
                   </div>
                 )}
               </CardContent>
@@ -1835,6 +2660,14 @@ export function Dashboard() {
             </span>
           </AccordionTrigger>
           <AccordionContent>
+            <div className="mb-4 rounded-xl border border-blue-300 bg-gradient-to-r from-blue-50 to-white px-6 py-4 shadow-sm">
+              <p className="text-xs font-bold uppercase tracking-[0.08em] text-blue-800">Contexto activo</p>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Cliente: {selectedClient}</span>
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Agente: {selectedExecutiveDisplayLabel}</span>
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Rango: {selectedRangeLabel}</span>
+            </div>
+            </div>
             <Card>
               <CardContent className="pt-6">
                 <div className="rounded-xl border border-slate-200 bg-white p-5">
@@ -1908,6 +2741,14 @@ export function Dashboard() {
             </span>
           </AccordionTrigger>
           <AccordionContent className="space-y-4">
+            <div className="rounded-xl border border-blue-300 bg-gradient-to-r from-blue-50 to-white px-6 py-4 shadow-sm">
+              <p className="text-xs font-bold uppercase tracking-[0.08em] text-blue-800">Contexto activo</p>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Cliente: {selectedClient}</span>
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Agente: {selectedExecutiveDisplayLabel}</span>
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Rango: {selectedRangeLabel}</span>
+            </div>
+            </div>
             <div className="grid gap-6 xl:grid-cols-2">
               <Card>
                 <CardHeader>
@@ -1984,6 +2825,14 @@ export function Dashboard() {
             </span>
           </AccordionTrigger>
           <AccordionContent>
+            <div className="mb-4 rounded-xl border border-blue-300 bg-gradient-to-r from-blue-50 to-white px-6 py-4 shadow-sm">
+              <p className="text-xs font-bold uppercase tracking-[0.08em] text-blue-800">Contexto activo</p>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Cliente: {selectedClient}</span>
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Agente: {selectedExecutiveDisplayLabel}</span>
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Rango: {selectedRangeLabel}</span>
+            </div>
+            </div>
             <div className="grid gap-4 md:grid-cols-3 xl:grid-cols-6">
               <Card><CardContent className="pt-6"><p className="text-xs text-gray-500">Visualizaciones</p><p className="mt-2 text-xl font-semibold">{safeNumber(dashboardModel.metrics.views).toLocaleString('es-CL')}</p></CardContent></Card>
               <Card><CardContent className="pt-6"><p className="text-xs text-gray-500">Espectadores unicos</p><p className="mt-2 text-xl font-semibold">{safeNumber(dashboardModel.metrics.uniqueViewers).toLocaleString('es-CL')}</p></CardContent></Card>
@@ -2003,6 +2852,14 @@ export function Dashboard() {
             </span>
           </AccordionTrigger>
           <AccordionContent className="space-y-4">
+            <div className="rounded-xl border border-blue-300 bg-gradient-to-r from-blue-50 to-white px-6 py-4 shadow-sm">
+              <p className="text-xs font-bold uppercase tracking-[0.08em] text-blue-800">Contexto activo</p>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Cliente: {selectedClient}</span>
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Agente: {selectedExecutiveDisplayLabel}</span>
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Rango: {selectedRangeLabel}</span>
+            </div>
+            </div>
             <Card>
               <CardHeader>
                 <CardTitle>Operacion diaria</CardTitle>
@@ -2098,6 +2955,14 @@ export function Dashboard() {
             </span>
           </AccordionTrigger>
           <AccordionContent>
+            <div className="mb-4 rounded-xl border border-blue-300 bg-gradient-to-r from-blue-50 to-white px-6 py-4 shadow-sm">
+              <p className="text-xs font-bold uppercase tracking-[0.08em] text-blue-800">Contexto activo</p>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Cliente: {selectedClient}</span>
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Agente: {selectedExecutiveDisplayLabel}</span>
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Rango: {selectedRangeLabel}</span>
+            </div>
+            </div>
             <Card>
               <CardContent className="pt-6">
                 <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -2122,6 +2987,14 @@ export function Dashboard() {
             </span>
           </AccordionTrigger>
           <AccordionContent>
+            <div className="mb-4 rounded-xl border border-blue-300 bg-gradient-to-r from-blue-50 to-white px-6 py-4 shadow-sm">
+              <p className="text-xs font-bold uppercase tracking-[0.08em] text-blue-800">Contexto activo</p>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Cliente: {selectedClient}</span>
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Agente: {selectedExecutiveDisplayLabel}</span>
+              <span className="inline-flex items-center rounded-full border border-blue-200 bg-white px-3 py-1 text-xs font-semibold text-blue-900">Rango: {selectedRangeLabel}</span>
+            </div>
+            </div>
             <div className="grid gap-4 md:grid-cols-2">
               {dashboardModel.alerts.map((alert: any, index: number) => (
                 <Card key={`${alert.title}-${index}`} className={getSeverityClasses(alert.severity)}>

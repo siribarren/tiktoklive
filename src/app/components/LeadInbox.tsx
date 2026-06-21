@@ -24,6 +24,7 @@ import {
 } from './ui/dialog';
 import { Input } from './ui/input';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
+import { useAuth } from '../auth/auth';
 
 const ALL_ACCOUNTS_VALUE = '__all_accounts__';
 
@@ -103,14 +104,8 @@ function isCalificarOption(value: string): value is (typeof CALIFICAR_STATE_OPTI
   return CALIFICAR_STATE_OPTIONS.includes(value as (typeof CALIFICAR_STATE_OPTIONS)[number]);
 }
 
-function resolveProfileRole(): string {
-  if (typeof window === 'undefined') {
-    return 'analista';
-  }
-  return window.localStorage.getItem('ember:user-profile') || 'analista';
-}
-
 export function LeadInbox() {
+  const { user } = useAuth();
   const { allLeads, accounts, liveSessions } = useRecorderBridge();
   const [statusOverrides, setStatusOverrides] = useState<Record<string, LeadStatus>>({});
   const [assignments, setAssignments] = useState<Record<string, string>>({});
@@ -120,8 +115,7 @@ export function LeadInbox() {
   const [editableLeadIds, setEditableLeadIds] = useState<Record<string, boolean>>({});
   const [actionDialog, setActionDialog] = useState<LeadActionDialogState | null>(null);
   const [selectedActionState, setSelectedActionState] = useState('');
-  const userProfile = resolveProfileRole();
-  const isSupervisor = userProfile === 'supervisor';
+  const canManageLeads = user?.role === 'administrator';
 
   const effectiveLeads = useMemo(
     () =>
@@ -476,77 +470,81 @@ export function LeadInbox() {
                             </Button>
                           </Link>
 
-                          <div className="inline-flex items-center gap-1">
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              className="h-7 px-2 text-[10px] gap-1"
-                              disabled={derivarLocked}
-                              onClick={() => openActionDialog(lead.id, 'derivar')}
-                              title={derivarLocked ? derivarLabel : undefined}
-                            >
-                              <UserPlus className="w-3.5 h-3.5" />
-                              {derivarLabel}
-                            </Button>
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <button
-                                  type="button"
-                                  className="inline-flex h-5 w-5 items-center justify-center rounded-full text-blue-600 hover:bg-blue-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
-                                  aria-label="Información sobre Derivar"
+                          {canManageLeads ? (
+                            <>
+                              <div className="inline-flex items-center gap-1">
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="h-7 px-2 text-[10px] gap-1"
+                                  disabled={derivarLocked}
+                                  onClick={() => openActionDialog(lead.id, 'derivar')}
+                                  title={derivarLocked ? derivarLabel : undefined}
                                 >
-                                  <Info className="h-3.5 w-3.5" />
-                                </button>
-                              </TooltipTrigger>
-                              <TooltipContent sideOffset={8}>
-                                Quién toma el lead o dónde queda asignado.
-                              </TooltipContent>
-                            </Tooltip>
-                          </div>
+                                  <UserPlus className="w-3.5 h-3.5" />
+                                  {derivarLabel}
+                                </Button>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <button
+                                      type="button"
+                                      className="inline-flex h-5 w-5 items-center justify-center rounded-full text-blue-600 hover:bg-blue-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
+                                      aria-label="Información sobre Derivar"
+                                    >
+                                      <Info className="h-3.5 w-3.5" />
+                                    </button>
+                                  </TooltipTrigger>
+                                  <TooltipContent sideOffset={8}>
+                                    Quién toma el lead o dónde queda asignado.
+                                  </TooltipContent>
+                                </Tooltip>
+                              </div>
 
-                          <div className="inline-flex items-center gap-1">
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              className="h-7 px-2 text-[10px] gap-1"
-                              disabled={calificarLocked}
-                              onClick={() => openActionDialog(lead.id, 'calificar')}
-                              title={calificarLocked ? calificarLabel : undefined}
-                            >
-                              <CheckCircle2 className="w-3.5 h-3.5" />
-                              {calificarLabel}
-                            </Button>
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <button
-                                  type="button"
-                                  className="inline-flex h-5 w-5 items-center justify-center rounded-full text-blue-600 hover:bg-blue-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
-                                  aria-label="Información sobre Calificar"
+                              <div className="inline-flex items-center gap-1">
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="h-7 px-2 text-[10px] gap-1"
+                                  disabled={calificarLocked}
+                                  onClick={() => openActionDialog(lead.id, 'calificar')}
+                                  title={calificarLocked ? calificarLabel : undefined}
                                 >
-                                  <Info className="h-3.5 w-3.5" />
-                                </button>
-                              </TooltipTrigger>
-                              <TooltipContent sideOffset={8}>
-                                En qué condición comercial queda el lead
-                              </TooltipContent>
-                            </Tooltip>
-                          </div>
+                                  <CheckCircle2 className="w-3.5 h-3.5" />
+                                  {calificarLabel}
+                                </Button>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <button
+                                      type="button"
+                                      className="inline-flex h-5 w-5 items-center justify-center rounded-full text-blue-600 hover:bg-blue-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
+                                      aria-label="Información sobre Calificar"
+                                    >
+                                      <Info className="h-3.5 w-3.5" />
+                                    </button>
+                                  </TooltipTrigger>
+                                  <TooltipContent sideOffset={8}>
+                                    En qué condición comercial queda el lead
+                                  </TooltipContent>
+                                </Tooltip>
+                              </div>
 
-                          {isSupervisor ? (
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="h-7 px-2 text-[10px]"
-                              onClick={() =>
-                                setEditableLeadIds((current) => ({
-                                  ...current,
-                                  [lead.id]: true,
-                                }))
-                              }
-                            >
-                              Editar
-                            </Button>
-                          ) : null}
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-7 px-2 text-[10px]"
+                                onClick={() =>
+                                  setEditableLeadIds((current) => ({
+                                    ...current,
+                                    [lead.id]: true,
+                                  }))
+                                }
+                              >
+                                Editar
+                              </Button>
+                            </>
+                          ) : (
+                            <span className="text-[10px] text-gray-500">Solo lectura</span>
+                          )}
                         </div>
                       </td>
                     </tr>
