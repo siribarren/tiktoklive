@@ -1,10 +1,9 @@
 import { useMemo, useState } from 'react';
-import { Link } from 'react-router';
+import { useNavigate } from 'react-router';
 import {
   CheckCircle2,
   Download,
   Filter,
-  Info,
   Search,
   UserPlus,
 } from 'lucide-react';
@@ -23,7 +22,6 @@ import {
   DialogTitle,
 } from './ui/dialog';
 import { Input } from './ui/input';
-import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import { useAuth } from '../auth/auth';
 
 const ALL_ACCOUNTS_VALUE = '__all_accounts__';
@@ -106,6 +104,7 @@ function isCalificarOption(value: string): value is (typeof CALIFICAR_STATE_OPTI
 
 export function LeadInbox() {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const { allLeads, accounts, liveSessions } = useRecorderBridge();
   const [statusOverrides, setStatusOverrides] = useState<Record<string, LeadStatus>>({});
   const [assignments, setAssignments] = useState<Record<string, string>>({});
@@ -349,9 +348,9 @@ export function LeadInbox() {
                   <th className="text-left py-2.5 px-2.5 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Nickname</th>
                   <th className="text-left py-2.5 px-2.5 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Categorías</th>
                   <th className="text-left py-2.5 px-2.5 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Último mensaje</th>
-                  <th className="text-left py-2.5 px-2.5 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Fecha origen</th>
-                  <th className="text-left py-2.5 px-2.5 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Asignado a</th>
-                  <th className="text-left py-2.5 px-2.5 text-[10px] font-medium text-gray-500 uppercase tracking-wider">Acciones</th>
+                  <th className="text-left py-2.5 px-2.5 text-[10px] font-medium text-gray-500 uppercase tracking-wider whitespace-nowrap">Fecha origen</th>
+                  <th className="text-left py-2.5 px-2.5 text-[10px] font-medium text-gray-500 uppercase tracking-wider whitespace-nowrap">Asignado a</th>
+                  <th className="text-left py-2.5 px-2.5 text-[10px] font-medium text-gray-500 uppercase tracking-wider whitespace-nowrap">Acciones</th>
                 </tr>
               </thead>
               <tbody>
@@ -436,97 +435,64 @@ export function LeadInbox() {
                         <p className="text-[11px] text-gray-600 truncate max-w-[180px]">{lead.lastMessage}</p>
                       </td>
                       <td className="py-2.5 px-2.5">
-                        <p className="text-[11px] text-gray-500">
+                        <p className="text-[11px] text-gray-500 whitespace-nowrap">
+                          {new Date(lead.lastActivity).toLocaleDateString('es-CL', {
+                            month: 'short',
+                            day: 'numeric',
+                          })}
+                          {' · '}
                           {new Date(lead.lastActivity).toLocaleTimeString('es-CL', {
                             hour12: false,
                             hour: '2-digit',
                             minute: '2-digit',
                           })}
                         </p>
-                        <p className="text-[10px] text-gray-400">
-                          {new Date(lead.lastActivity).toLocaleDateString('es-CL', {
-                            month: 'short',
-                            day: 'numeric',
-                          })}
-                        </p>
                       </td>
                       <td className="py-2.5 px-2.5">
                         {lead.assignedTo ? (
-                          <Badge variant="outline" className="h-6 px-1.5 text-[10px] bg-gray-50 text-gray-700">
+                          <Badge
+                            variant="outline"
+                            className="h-6 px-1.5 text-[10px] bg-gray-50 text-gray-700 whitespace-nowrap"
+                          >
                             {lead.assignedTo}
                           </Badge>
                         ) : (
                           <span className="text-[10px] text-gray-400">Sin asignar</span>
                         )}
                       </td>
-                      <td className="py-2.5 px-2.5">
-                        <div className="flex flex-wrap items-center gap-1">
-                          <Link to={`/leads/${lead.id}`}>
-                            <Button
-                              size="sm"
-                              className="h-7 px-2 text-[10px] gap-1 bg-blue-600 text-white hover:bg-blue-700 shadow-sm"
-                            >
-                              Ver
-                            </Button>
-                          </Link>
-
+                      <td className="py-2.5 px-2.5 whitespace-nowrap">
+                        <div className="flex flex-nowrap items-center gap-1.5 whitespace-nowrap">
+                          <Button
+                            size="sm"
+                            className="h-7 px-2 text-[10px] gap-1 bg-blue-600 text-white hover:bg-blue-700 shadow-sm"
+                            onClick={() => navigate(`/leads/${lead.id}`)}
+                          >
+                            Ver
+                          </Button>
                           {canManageLeads ? (
                             <>
-                              <div className="inline-flex items-center gap-1">
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  className="h-7 px-2 text-[10px] gap-1"
-                                  disabled={derivarLocked}
-                                  onClick={() => openActionDialog(lead.id, 'derivar')}
-                                  title={derivarLocked ? derivarLabel : undefined}
-                                >
-                                  <UserPlus className="w-3.5 h-3.5" />
-                                  {derivarLabel}
-                                </Button>
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <button
-                                      type="button"
-                                      className="inline-flex h-5 w-5 items-center justify-center rounded-full text-blue-600 hover:bg-blue-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
-                                      aria-label="Información sobre Derivar"
-                                    >
-                                      <Info className="h-3.5 w-3.5" />
-                                    </button>
-                                  </TooltipTrigger>
-                                  <TooltipContent sideOffset={8}>
-                                    Quién toma el lead o dónde queda asignado.
-                                  </TooltipContent>
-                                </Tooltip>
-                              </div>
-
-                              <div className="inline-flex items-center gap-1">
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  className="h-7 px-2 text-[10px] gap-1"
-                                  disabled={calificarLocked}
-                                  onClick={() => openActionDialog(lead.id, 'calificar')}
-                                  title={calificarLocked ? calificarLabel : undefined}
-                                >
-                                  <CheckCircle2 className="w-3.5 h-3.5" />
-                                  {calificarLabel}
-                                </Button>
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <button
-                                      type="button"
-                                      className="inline-flex h-5 w-5 items-center justify-center rounded-full text-blue-600 hover:bg-blue-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40"
-                                      aria-label="Información sobre Calificar"
-                                    >
-                                      <Info className="h-3.5 w-3.5" />
-                                    </button>
-                                  </TooltipTrigger>
-                                  <TooltipContent sideOffset={8}>
-                                    En qué condición comercial queda el lead
-                                  </TooltipContent>
-                                </Tooltip>
-                              </div>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="h-7 px-2 text-[10px] gap-1"
+                                disabled={derivarLocked}
+                                onClick={() => openActionDialog(lead.id, 'derivar')}
+                                title={derivarLocked ? derivarLabel : 'Derivar lead'}
+                              >
+                                <UserPlus className="w-3.5 h-3.5" />
+                                Derivar
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="h-7 px-2 text-[10px] gap-1"
+                                disabled={calificarLocked}
+                                onClick={() => openActionDialog(lead.id, 'calificar')}
+                                title={calificarLocked ? calificarLabel : 'Calificar lead'}
+                              >
+                                <CheckCircle2 className="w-3.5 h-3.5" />
+                                Calificar
+                              </Button>
 
                               <Button
                                 variant="ghost"

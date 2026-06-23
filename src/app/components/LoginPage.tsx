@@ -30,7 +30,7 @@ export function LoginPage() {
   const redirectTo = useMemo(() => {
     const state = location.state as { from?: { pathname?: string; search?: string; hash?: string } } | null;
     const from = state?.from;
-    const pathname = from?.pathname?.trim();
+    const pathname = typeof from?.pathname === 'string' ? from.pathname.trim() : '';
     if (!pathname) {
       return '/';
     }
@@ -51,7 +51,7 @@ export function LoginPage() {
     setErrorMessage(null);
 
     try {
-      await login(loginValue.trim(), password);
+      await login(String(loginValue ?? '').trim(), password);
       navigate(redirectTo, { replace: true });
     } catch (error) {
       if (error instanceof Error) {
