@@ -1,4 +1,4 @@
-import { Outlet, Link, useLocation } from 'react-router';
+import { Outlet, Link, useLocation, useNavigate } from 'react-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   LayoutDashboard,
@@ -19,8 +19,10 @@ import { Button } from './ui/button';
 import { useRecorderBridge } from '../data/useRecorderBridge';
 import { useAuth } from '../auth/auth';
 
-const LIVE_STATUS_FRESHNESS_MS = 90 * 1000;
-const NOTIFICATION_AUTO_DISMISS_MS = 10 * 1000;
+const LIVE_STATUS_FRESHNESS_MS = 12 * 60 * 1000;
+const NOTIFICATION_AUTO_DISMISS_MS = 5 * 1000;
+const NOTIFICATION_FADE_MS = 450;
+const ACCOUNTS_FOCUS_TARGET_STORAGE_KEY = 'ember:accounts-focus-target';
 
 const normalizeUniqueId = (value?: string) => {
   const trimmed = (value ?? '').trim().toLowerCase();
@@ -46,6 +48,12 @@ type OnlineNotification = {
   title: string;
   description: string;
   startedAtLabel: string;
+  isClosing?: boolean;
+};
+
+type NotificationTimerEntry = {
+  timerId: number;
+  phase: 'auto' | 'removal';
 };
 
 const dedupeNotificationsByTarget = (entries: OnlineNotification[]) => {
@@ -72,14 +80,16 @@ const navigation = [
 
 export function DashboardLayout() {
   const location = useLocation();
+  const navigate = useNavigate();
   const { user, logout } = useAuth();
   const { runningTargets, configuredTargets, liveStatuses, updatedAt, liveSessions } = useRecorderBridge();
   const [onlineNotifications, setOnlineNotifications] = useState<OnlineNotification[]>([]);
   const [notificationHistory, setNotificationHistory] = useState<OnlineNotification[]>([]);
   const [isNotificationPanelOpen, setIsNotificationPanelOpen] = useState(false);
   const previousOnlineTargetsRef = useRef<Set<string> | null>(null);
+  const hasInitializedNotificationBaselineRef = useRef(false);
   const dismissedNotificationsRef = useRef<Set<string>>(new Set());
-  const notificationTimersRef = useRef<Map<string, number>>(new Map());
+  const notificationTimersRef = useRef<Map<string, NotificationTimerEntry>>(new Map());
   const onlineRunningTargets = useMemo(() => {
     const now = Date.now();
     return runningTargets
@@ -150,11 +160,18 @@ export function DashboardLayout() {
 
   useEffect(() => {
     const currentOnlineSet = new Set(onlineRegisteredTargets);
-    const previousOnlineSet = previousOnlineTargetsRef.current;
+    if (!updatedAt) {
+      previousOnlineTargetsRef.current = currentOnlineSet;
+      return;
+    }
+    if (!hasInitializedNotificationBaselineRef.current) {
+      previousOnlineTargetsRef.current = currentOnlineSet;
+      hasInitializedNotificationBaselineRef.current = true;
+      return;
+    }
+    const previousOnlineSet = previousOnlineTargetsRef.current ?? new Set<string>();
     const newlyOnlineTargets =
-      previousOnlineSet === null
-        ? onlineRegisteredTargets
-        : onlineRegisteredTargets.filter((target) => !previousOnlineSet.has(target));
+      onlineRegisteredTargets.filter((target) => !previousOnlineSet.has(target));
     dismissedNotificationsRef.current.forEach((target) => {
       if (!currentOnlineSet.has(target)) {
         dismissedNotificationsRef.current.delete(target);
@@ -219,46 +236,102 @@ export function DashboardLayout() {
     }
 
     previousOnlineTargetsRef.current = currentOnlineSet;
-  }, [onlineRegisteredTargets, liveStatuses, activeSessionStartByTarget]);
+  }, [onlineRegisteredTargets, liveStatuses, activeSessionStartByTarget, updatedAt]);
 
   const dismissNotification = useCallback(
-    (notificationId: string, targetHint?: string) => {
-      const timerId = notificationTimersRef.current.get(notificationId);
-      if (timerId) {
-        window.clearTimeout(timerId);
+    (
+      notificationId: string,
+      targetHint?: string,
+      options?: { navigateToAccounts?: boolean; keepHistory?: boolean }
+    ) => {
+      const timerEntry = notificationTimersRef.current.get(notificationId);
+      const currentTarget =
+        targetHint ?? onlineNotifications.find((entry) => entry.id === notificationId)?.target;
+
+      if (timerEntry?.phase === 'removal') {
+        if (options?.navigateToAccounts && currentTarget) {
+          if (typeof window !== 'undefined') {
+            window.localStorage.setItem(ACCOUNTS_FOCUS_TARGET_STORAGE_KEY, currentTarget);
+          }
+          setIsNotificationPanelOpen(false);
+          navigate('/accounts', {
+            state: {
+              focusAccount: currentTarget,
+            },
+          });
+        }
+        if (options?.keepHistory === false) {
+          setNotificationHistory((current) => current.filter((entry) => entry.id !== notificationId));
+        }
+        return;
+      }
+      if (timerEntry) {
+        window.clearTimeout(timerEntry.timerId);
         notificationTimersRef.current.delete(notificationId);
       }
 
-      setOnlineNotifications((current) => {
-        const notification = current.find((entry) => entry.id === notificationId);
-        const target = targetHint ?? notification?.target;
-        if (target) {
-          dismissedNotificationsRef.current.add(target);
+      if (currentTarget) {
+        dismissedNotificationsRef.current.add(currentTarget);
+      }
+
+      setOnlineNotifications((current) =>
+        current.map((entry) =>
+          entry.id === notificationId ? { ...entry, isClosing: true } : entry
+        )
+      );
+
+      const removalTimerId = window.setTimeout(() => {
+        setOnlineNotifications((current) => current.filter((entry) => entry.id !== notificationId));
+        if (!options?.keepHistory) {
+          setNotificationHistory((current) => current.filter((entry) => entry.id !== notificationId));
         }
-        return current.filter((entry) => entry.id !== notificationId);
+        const activeTimerEntry = notificationTimersRef.current.get(notificationId);
+        if (activeTimerEntry?.timerId === removalTimerId) {
+          notificationTimersRef.current.delete(notificationId);
+        }
+      }, NOTIFICATION_FADE_MS);
+
+      notificationTimersRef.current.set(notificationId, {
+        timerId: removalTimerId,
+        phase: 'removal',
       });
 
-      setNotificationHistory((current) => current.filter((entry) => entry.id !== notificationId));
+      if (options?.navigateToAccounts && currentTarget) {
+        if (typeof window !== 'undefined') {
+          window.localStorage.setItem(ACCOUNTS_FOCUS_TARGET_STORAGE_KEY, currentTarget);
+        }
+        setIsNotificationPanelOpen(false);
+        navigate('/accounts', {
+          state: {
+            focusAccount: currentTarget,
+          },
+        });
+      }
     },
-    []
+    [navigate, onlineNotifications]
   );
 
   useEffect(() => {
     for (const notification of onlineNotifications) {
-      if (notificationTimersRef.current.has(notification.id)) {
+      if (notification.isClosing || notificationTimersRef.current.has(notification.id)) {
         continue;
       }
 
       const timerId = window.setTimeout(() => {
-        dismissNotification(notification.id, notification.target);
+        dismissNotification(notification.id, notification.target, {
+          keepHistory: false,
+        });
       }, NOTIFICATION_AUTO_DISMISS_MS);
-      notificationTimersRef.current.set(notification.id, timerId);
+      notificationTimersRef.current.set(notification.id, {
+        timerId,
+        phase: 'auto',
+      });
     }
 
     for (const [notificationId, timerId] of notificationTimersRef.current.entries()) {
       const stillPresent = onlineNotifications.some((entry) => entry.id === notificationId);
       if (!stillPresent) {
-        window.clearTimeout(timerId);
+        window.clearTimeout(timerId.timerId);
         notificationTimersRef.current.delete(notificationId);
       }
     }
@@ -266,8 +339,8 @@ export function DashboardLayout() {
 
   useEffect(() => {
     return () => {
-      for (const timerId of notificationTimersRef.current.values()) {
-        window.clearTimeout(timerId);
+      for (const timerEntry of notificationTimersRef.current.values()) {
+        window.clearTimeout(timerEntry.timerId);
       }
       notificationTimersRef.current.clear();
     };
@@ -404,7 +477,28 @@ export function DashboardLayout() {
                         {latestFiveNotifications.map((notification) => (
                           <div
                             key={notification.id}
-                            className="flex items-start gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2.5"
+                            role="button"
+                            tabIndex={0}
+                            className={`flex items-start gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-left transition-all duration-500 ease-out ${
+                              notification.isClosing
+                                ? 'pointer-events-none translate-y-1 opacity-0'
+                                : 'cursor-pointer hover:border-emerald-300 hover:bg-emerald-50/50'
+                            }`}
+                            onClick={() =>
+                              dismissNotification(notification.id, notification.target, {
+                                navigateToAccounts: true,
+                                keepHistory: false,
+                              })
+                            }
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter' || event.key === ' ') {
+                                event.preventDefault();
+                                dismissNotification(notification.id, notification.target, {
+                                  navigateToAccounts: true,
+                                  keepHistory: false,
+                                });
+                              }
+                            }}
                           >
                             <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-500" />
                             <div className="min-w-0 flex-1">
@@ -420,7 +514,10 @@ export function DashboardLayout() {
                             </div>
                             <button
                               type="button"
-                              onClick={() => dismissNotification(notification.id, notification.target)}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                dismissNotification(notification.id, notification.target);
+                              }}
                               className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
                               aria-label={`Cerrar notificación de ${notification.target}`}
                             >
@@ -438,7 +535,28 @@ export function DashboardLayout() {
                   {onlineNotifications.map((notification) => (
                     <div
                       key={notification.id}
-                      className="flex items-start gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm"
+                      role="button"
+                      tabIndex={0}
+                      className={`flex items-start gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm transition-all duration-500 ease-out ${
+                        notification.isClosing
+                          ? 'pointer-events-none translate-y-1 opacity-0'
+                          : 'cursor-pointer hover:border-emerald-300 hover:bg-emerald-50/70'
+                      }`}
+                      onClick={() =>
+                        dismissNotification(notification.id, notification.target, {
+                          navigateToAccounts: true,
+                          keepHistory: false,
+                        })
+                      }
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault();
+                          dismissNotification(notification.id, notification.target, {
+                            navigateToAccounts: true,
+                            keepHistory: false,
+                          });
+                        }
+                      }}
                     >
                       <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-500" />
                       <div className="min-w-0 flex-1">
@@ -454,7 +572,10 @@ export function DashboardLayout() {
                       </div>
                       <button
                         type="button"
-                        onClick={() => dismissNotification(notification.id, notification.target)}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          dismissNotification(notification.id, notification.target);
+                        }}
                         className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
                         aria-label={`Cerrar notificación de ${notification.target}`}
                       >

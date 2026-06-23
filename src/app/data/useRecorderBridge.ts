@@ -345,18 +345,9 @@ function mapAccountToSession(
     startTime,
     endTime,
     previousSession,
-    messagesCount:
-      archived && (account.messagesCount ?? 0) === 0
-        ? archived.messagesCount
-        : account.messagesCount ?? 0,
-    leadsDetected:
-      archived && (account.leadsDetected ?? 0) === 0
-        ? archived.leadsDetected
-        : account.leadsDetected ?? 0,
-    viewers:
-      archived && (account.viewers ?? 0) === 0
-        ? archived.viewers
-        : account.viewers ?? 0,
+    messagesCount: account.messagesCount ?? 0,
+    leadsDetected: account.leadsDetected ?? 0,
+    viewers: account.viewers ?? 0,
   };
 }
 

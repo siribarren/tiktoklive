@@ -5,10 +5,10 @@ import { Radio, Eye, MessageSquare, Users, Clock, Copy, Check, X } from 'lucide-
 import { useRecorderBridge } from '../data/useRecorderBridge';
 import { Link, useNavigate } from 'react-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { TikTokPhoneLiveModal } from './tiktok/tiktok-phone-live-modal';
 import { readJsonResponse, resolveApiErrorMessage } from '../../lib/http';
 import { resolveClientByAccount } from '../dashboard/client-users.mjs';
 import { authFetch, useAuth } from '../auth/auth';
+import { openTikTokLivePopup } from '@/lib/tiktok-live';
 
 const normalizeUniqueId = (value: string) => {
   const trimmed = value.trim();
@@ -16,7 +16,7 @@ const normalizeUniqueId = (value: string) => {
   return trimmed.startsWith('@') ? trimmed.toLowerCase() : `@${trimmed.toLowerCase()}`;
 };
 const DASHBOARD_CLIENT_STORAGE_KEY = 'ember:dashboard:selected-client';
-const LIVE_STATUS_FRESHNESS_MS = 90 * 1000;
+const LIVE_STATUS_FRESHNESS_MS = 12 * 60 * 1000;
 const DELETED_ACCOUNTS_STORAGE_KEY = 'ember:deleted-accounts';
 const START_MONITORING_PROGRESS_STAGES = [
   'Validando la cuenta',
@@ -32,16 +32,6 @@ const START_MONITORING_ERROR_VISIBLE_MS = 3_000;
 const STOP_MONITORING_PROGRESS_TOTAL_MS = 3_000;
 const STOP_MONITORING_DONE_VISIBLE_MS = 1_000;
 type SessionClientFilter = 'WOM' | 'CLARO';
-type LivePreviewAccount = {
-  username: string;
-  displayName: string;
-  isLive: boolean;
-  playbackUrl: string | null;
-  viewerCount: number;
-  leadCount: number;
-  messageCount: number;
-  streamStartedAt: Date | null;
-};
 const SESSION_CLIENT_LOGO_ASSETS: Record<
   SessionClientFilter,
   { primary: string; fallback?: string }
@@ -157,7 +147,6 @@ export function LiveSessions() {
     return fallbackClient;
   });
   const [copiedSessionId, setCopiedSessionId] = useState<string | null>(null);
-  const [livePreviewAccount, setLivePreviewAccount] = useState<LivePreviewAccount | null>(null);
   const [startProgress, setStartProgress] = useState<{
     account: string;
     stageIndex: number;
@@ -601,21 +590,6 @@ export function LiveSessions() {
     }
   };
 
-  const openLivePreview = (session: (typeof sessions)[number]) => {
-    const normalizedAccount = normalizeUniqueId(session.accountName);
-    const liveStatus = liveStatuses[normalizedAccount];
-    setLivePreviewAccount({
-      username: session.accountName,
-      displayName: session.accountName,
-      isLive: liveStatus?.status === 'online' || liveStatus?.isLive === true,
-      playbackUrl: liveStatus?.playbackUrl ?? null,
-      viewerCount: session.viewers,
-      leadCount: session.leadsDetected,
-      messageCount: session.messagesCount,
-      streamStartedAt: liveStatus?.liveStartedAt ?? session.startTime ?? null,
-    });
-  };
-
   return (
     <div className="p-6 space-y-6">
       {/* Header */}
@@ -834,13 +808,13 @@ export function LiveSessions() {
                           title={
                             !isMonitored
                               ? 'Primero debes iniciar el monitoreo de esta cuenta.'
-                              : 'La cuenta debe estar ONLINE para abrir Ver Live.'
+                              : 'La cuenta debe estar ONLINE para abrir el live en una nueva ventana.'
                           }
                           onClick={() => {
                             if (!canOpenLive) {
                               return;
                             }
-                            openLivePreview(session);
+                            openTikTokLivePopup(session.accountName);
                           }}
                         >
                           Ver Live
@@ -1002,22 +976,6 @@ export function LiveSessions() {
           </p>
         ) : null}
       </div>
-      <TikTokPhoneLiveModal
-        username={livePreviewAccount?.username ?? ''}
-        displayName={livePreviewAccount?.displayName}
-        isLive={livePreviewAccount?.isLive}
-        playbackUrl={livePreviewAccount?.playbackUrl}
-        viewerCount={livePreviewAccount?.viewerCount}
-        leadCount={livePreviewAccount?.leadCount}
-        messageCount={livePreviewAccount?.messageCount}
-        streamStartedAt={livePreviewAccount?.streamStartedAt}
-        open={livePreviewAccount !== null}
-        onOpenChange={(open) => {
-          if (!open) {
-            setLivePreviewAccount(null);
-          }
-        }}
-      />
     </div>
   );
 }

@@ -9,6 +9,7 @@
 ### RecorderCoordinator
 - Vive en `tiktoklive-recorder/main.py`.
 - Orquesta workers por cuenta (`start/stop/reconnect`) y expone estado operativo.
+- La lista de cuentas activas sale de PostgreSQL; `targets.json` queda solo como espejo de compatibilidad.
 
 ### CurrentMessagesPublisher
 - Vive en `tiktoklive-recorder/main.py`.

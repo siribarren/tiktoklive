@@ -1,10 +1,18 @@
+import { useState } from 'react';
 import { Link, useParams } from 'react-router';
-import { ArrowLeft, Clock3, Eye, MessageSquare, Sparkles, Copy, Check } from 'lucide-react';
+import { ArrowLeft, Clock3, Eye, MessageSquare, Sparkles } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { useRecorderBridge } from '../data/useRecorderBridge';
-import { useState } from 'react';
+
+function normalizeUniqueId(value?: string) {
+  const trimmed = (value ?? '').trim().toLowerCase();
+  if (!trimmed) {
+    return '';
+  }
+  return trimmed.startsWith('@') ? trimmed : `@${trimmed}`;
+}
 
 const formatSessionDuration = (totalMinutes: number) => {
   if (totalMinutes >= 60) {
@@ -19,8 +27,7 @@ const formatSessionDuration = (totalMinutes: number) => {
 
 export function SessionReport() {
   const { id } = useParams();
-  const { liveSessions, accountLabel, messages, leads } = useRecorderBridge();
-  const [copiedSessionId, setCopiedSessionId] = useState<string | null>(null);
+  const { liveSessions, accountLabel, messages, leads, accounts } = useRecorderBridge();
   const session = liveSessions.find((item) => item.id === id);
 
   if (!session) {
@@ -35,10 +42,16 @@ export function SessionReport() {
   }
 
   const isCurrentAccount = session.accountName === accountLabel;
+  const isEndedSession = session.status === 'Ended' || Boolean(session.endTime);
   const sessionReferenceId = session.rawSessionId ?? session.id;
   const messagesBySessionHref = `/messages?sessionId=${encodeURIComponent(
     sessionReferenceId
   )}&account=${encodeURIComponent(session.accountName)}`;
+  const sessionAccount = accounts.find(
+    (account) => normalizeUniqueId(account.uniqueId) === normalizeUniqueId(session.accountName)
+  );
+  const agentLabel = sessionAccount?.displayName?.trim() || 'Sin agente';
+  const clientLabel = sessionAccount?.clientName?.trim() || 'Sin cliente';
   const sessionTimeStart = session.startTime.getTime();
   const sessionTimeEnd = session.endTime?.getTime() ?? Number.POSITIVE_INFINITY;
   const sessionMessages = isCurrentAccount
@@ -67,17 +80,11 @@ export function SessionReport() {
         Math.floor((Date.now() - session.startTime.getTime()) / (1000 * 60))
       );
   const durationLabel = formatSessionDuration(durationMinutes);
-  const copySessionId = async () => {
-    try {
-      await navigator.clipboard.writeText(session.id);
-      setCopiedSessionId(session.id);
-      window.setTimeout(() => {
-        setCopiedSessionId((current) => (current === session.id ? null : current));
-      }, 1500);
-    } catch {
-      // Intentionally silent: report remains usable without clipboard support.
-    }
-  };
+  const endTimeLabel = session.endTime
+    ? session.endTime.toLocaleString('es-CL')
+    : isEndedSession
+      ? 'Finalizada'
+      : 'Sigue activa';
 
   return (
     <div className="p-6 space-y-6">
@@ -90,45 +97,27 @@ export function SessionReport() {
             </Button>
           </Link>
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <h1 className="text-2xl font-semibold text-gray-900">Reporte de sesión</h1>
-              <Badge variant="outline" className="bg-gray-50 text-gray-700 border-gray-300">
-                ID: <span className="ml-1 font-mono">{session.id}</span>
-              </Badge>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="h-7 px-2 text-xs text-gray-500 hover:text-gray-700"
-                onClick={() => {
-                  void copySessionId();
-                }}
-              >
-                {copiedSessionId === session.id ? (
-                  <>
-                    <Check className="w-3.5 h-3.5 mr-1" />
-                    Copiado
-                  </>
-                ) : (
-                  <>
-                    <Copy className="w-3.5 h-3.5 mr-1" />
-                    Copiar
-                  </>
-                )}
-              </Button>
             </div>
-            <p className="text-sm text-gray-500 mt-1">{session.accountName}</p>
+            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-gray-500">
+              <span className="font-medium text-gray-900">{session.accountName}</span>
+              <span aria-hidden="true">·</span>
+              <span>
+                Agente: <span className="font-medium text-gray-900">{agentLabel}</span>
+              </span>
+              <span aria-hidden="true">·</span>
+              <span>
+                Cliente: <span className="font-medium text-gray-900">{clientLabel}</span>
+              </span>
+            </div>
           </div>
         </div>
         <Badge
           variant="outline"
-          className={
-            session.status === 'Active'
-              ? 'bg-green-50 text-green-700 border-green-200'
-              : 'bg-gray-50 text-gray-700 border-gray-200'
-          }
+          className={isEndedSession ? 'bg-gray-50 text-gray-700 border-gray-200' : 'bg-green-50 text-green-700 border-green-200'}
         >
-          {session.status === 'Active' ? 'Activa' : 'Finalizada'}
+          {isEndedSession ? 'Finalizada' : 'Activa'}
         </Badge>
       </div>
 
@@ -188,28 +177,28 @@ export function SessionReport() {
 
       <div className="grid grid-cols-2 gap-6">
         <Card>
-          <CardHeader>
-            <CardTitle>Detalle temporal</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3 text-sm text-gray-600">
-            <div className="flex items-center justify-between">
-              <span>Inicio</span>
-              <span className="font-medium text-gray-900">
-                {session.startTime.toLocaleString('es-CL')}
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span>Fin</span>
-              <span className="font-medium text-gray-900">
-                {session.endTime ? session.endTime.toLocaleString('es-CL') : 'Sigue activa'}
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span>Cuenta analizada</span>
-              <span className="font-medium text-gray-900">{session.accountName}</span>
-            </div>
-          </CardContent>
-        </Card>
+        <CardHeader>
+          <CardTitle>Detalle temporal</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm text-gray-600">
+          <div className="flex items-center justify-between">
+            <span>Inicio</span>
+            <span className="font-medium text-gray-900">
+              {session.startTime.toLocaleString('es-CL')}
+            </span>
+          </div>
+          <div className="flex items-center justify-between">
+            <span>FIN</span>
+            <span className="font-medium text-gray-900">
+              {endTimeLabel}
+            </span>
+          </div>
+          <div className="flex items-center justify-between">
+            <span>Tiempo de transmision</span>
+            <span className="font-medium text-gray-900">{durationLabel}</span>
+          </div>
+        </CardContent>
+      </Card>
 
         <Card>
           <CardHeader>

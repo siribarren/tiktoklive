@@ -56,13 +56,33 @@ load_dotenv()
 
 DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID", "1lGNGn3QABqcsjEZ9f1JHzgiXXTtyyVst")
 TARGETS_FILE = os.getenv("TARGETS_FILE", "targets.json")
-TIKTOK_UNIQUE_ID = os.getenv("TIKTOK_UNIQUE_ID")
 CONTROL_HOST = os.getenv("RECORDER_CONTROL_HOST", "127.0.0.1")
 CONTROL_PORT = int(os.getenv("RECORDER_CONTROL_PORT", "8765"))
-LIVE_STATUS_CACHE_TTL_SECONDS = int(os.getenv("LIVE_STATUS_CACHE_TTL_SECONDS", "45"))
+MIN_LIVE_STATUS_REFRESH_INTERVAL_SECONDS = 600
+LIVE_STATUS_REFRESH_INTERVAL_SECONDS = max(
+    MIN_LIVE_STATUS_REFRESH_INTERVAL_SECONDS,
+    int(os.getenv("LIVE_STATUS_REFRESH_INTERVAL_SECONDS", str(MIN_LIVE_STATUS_REFRESH_INTERVAL_SECONDS))),
+)
+LISTENER_SUPERVISION_INTERVAL_SECONDS = max(
+    30,
+    int(os.getenv("LISTENER_SUPERVISION_INTERVAL_SECONDS", "60")),
+)
+LIVE_STATUS_CACHE_TTL_SECONDS = max(
+    LIVE_STATUS_REFRESH_INTERVAL_SECONDS,
+    int(os.getenv("LIVE_STATUS_CACHE_TTL_SECONDS", str(LIVE_STATUS_REFRESH_INTERVAL_SECONDS))),
+)
 LIVE_STATUS_TIMEOUT_SECONDS = int(os.getenv("LIVE_STATUS_TIMEOUT_SECONDS", "20"))
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://ember:ember@127.0.0.1:5432/ember")
 AUTH_SESSION_TTL_DAYS = int(os.getenv("AUTH_SESSION_TTL_DAYS", "30"))
+LEGACY_DEMO_TARGETS = [
+    "@f.catalinaa777",
+    "@ejecutivawommari",
+    "@ejecutivawomfabi",
+    "@ejecutivadewom",
+    "@claro_benficios",
+    "@ejecutivawomcynthia",
+    "@ada_rengifo1012",
+]
 
 LOGS_DIR = Path("logs")
 LEADS_DIR = Path("leads")
@@ -133,8 +153,734 @@ def normalize_db_client_key(value: str) -> str:
     return ""
 
 
+def normalize_db_account_priority(value: object, default: str = "high") -> str:
+    raw_value = str(value or "").strip().lower()
+    if raw_value in {"high", "medium", "low"}:
+        return raw_value
+    if raw_value in {"alta", "alto"}:
+        return "high"
+    if raw_value in {"media", "medio"}:
+        return "medium"
+    if raw_value in {"baja", "bajo"}:
+        return "low"
+    return default
+
+
 def normalize_db_role(value: str) -> str:
     return str(value or "").strip().lower()
+
+
+def ensure_client_id(connection, client_code: str) -> str:
+    normalized_client_code = normalize_db_client_key(client_code)
+    if not normalized_client_code:
+        raise ValueError("Debes enviar campaign o client_code.")
+
+    client_name_map = {
+        "WOM": "WOM",
+        "CLARO": "Claro",
+    }
+    client_name = client_name_map.get(normalized_client_code, normalized_client_code.title())
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT id
+            FROM ember.clients
+            WHERE code = %s
+            LIMIT 1
+            """,
+            (normalized_client_code,),
+        )
+        client_row = cursor.fetchone()
+        if client_row:
+            return str(client_row["id"])
+
+        cursor.execute(
+            """
+            INSERT INTO ember.clients (code, name)
+            VALUES (%s, %s)
+            RETURNING id
+            """,
+            (normalized_client_code, client_name),
+        )
+        client_row = cursor.fetchone()
+        return str(client_row["id"])
+
+
+def ensure_account_record(
+    connection,
+    unique_id: str,
+    *,
+    client_code: Optional[str] = None,
+    display_name: Optional[str] = None,
+    priority: Optional[str] = None,
+    activate: bool = True,
+) -> Optional[Dict[str, object]]:
+    normalized_unique_id = normalize_db_unique_id(unique_id)
+    if not normalized_unique_id:
+        raise ValueError("Debes enviar unique_id.")
+
+    normalized_client_code = normalize_db_client_key(client_code or "")
+    requested_display_name = str(display_name or "").strip()
+    requested_priority = (
+        normalize_db_account_priority(priority)
+        if priority is not None and str(priority).strip()
+        else None
+    )
+    metadata_payload = {
+        "channel": "tiktok",
+        "source": "recorder",
+    }
+    if normalized_client_code:
+        metadata_payload["campaign"] = normalized_client_code
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT
+              a.id,
+              a.client_id,
+              a.external_id,
+              a.username,
+              a.display_name,
+              a.priority,
+              a.status,
+              a.timezone,
+              a.last_live_at,
+              a.last_activity_at,
+              a.metadata,
+              a.created_at,
+              a.updated_at,
+              c.code AS client_code
+            FROM ember.accounts a
+            JOIN ember.clients c ON c.id = a.client_id
+            WHERE a.platform = 'tiktok'
+              AND lower(a.username) = lower(%s)
+            LIMIT 1
+            """,
+            (normalized_unique_id,),
+        )
+        existing_account = cursor.fetchone()
+
+        if existing_account:
+            client_id = existing_account["client_id"]
+            resolved_client_code = normalized_client_code or normalize_db_client_key(
+                existing_account.get("client_code", "")
+            )
+            if resolved_client_code:
+                client_id = ensure_client_id(connection, resolved_client_code)
+
+            resolved_display_name = requested_display_name or str(
+                existing_account.get("display_name") or ""
+            ).strip()
+            if not resolved_display_name:
+                resolved_display_name = normalized_unique_id.replace("@", "")
+
+            resolved_priority = requested_priority or normalize_db_account_priority(
+                existing_account.get("priority") or ""
+            )
+            cursor.execute(
+                """
+                UPDATE ember.accounts
+                SET client_id = %s,
+                    external_id = %s,
+                    username = %s,
+                    display_name = %s,
+                    priority = %s,
+                    status = CASE WHEN %s THEN 'active' ELSE status END,
+                    last_activity_at = COALESCE(last_activity_at, now()),
+                    updated_at = now(),
+                    metadata = jsonb_strip_nulls(
+                        COALESCE(metadata, '{}'::jsonb) || %s::jsonb
+                    )
+                WHERE id = %s
+                RETURNING
+                  id,
+                  client_id,
+                  external_id,
+                  username,
+                  display_name,
+                  priority,
+                  status,
+                  timezone,
+                  last_live_at,
+                  last_activity_at,
+                  metadata,
+                  created_at,
+                  updated_at
+                """,
+                (
+                    client_id,
+                    normalized_unique_id.replace("@", ""),
+                    normalized_unique_id,
+                    resolved_display_name,
+                    resolved_priority,
+                    activate,
+                    json.dumps(metadata_payload),
+                    existing_account["id"],
+                ),
+            )
+            return dict(cursor.fetchone() or {})
+
+        if not normalized_client_code:
+            raise ValueError("Debes seleccionar una campaña para crear la cuenta.")
+
+        client_id = ensure_client_id(connection, normalized_client_code)
+        resolved_display_name = requested_display_name or normalized_unique_id.replace("@", "")
+        resolved_priority = requested_priority or "high"
+        cursor.execute(
+            """
+            INSERT INTO ember.accounts (
+              client_id,
+              platform,
+              external_id,
+              username,
+              display_name,
+              priority,
+              status,
+              timezone,
+              last_activity_at,
+              metadata
+            )
+            VALUES (%s, 'tiktok', %s, %s, %s, %s, %s, 'America/Santiago', now(), %s::jsonb)
+            RETURNING
+              id,
+              client_id,
+              external_id,
+              username,
+              display_name,
+              priority,
+              status,
+              timezone,
+              last_live_at,
+              last_activity_at,
+              metadata,
+              created_at,
+              updated_at
+            """,
+            (
+                client_id,
+                normalized_unique_id.replace("@", ""),
+                normalized_unique_id,
+                resolved_display_name,
+                resolved_priority,
+                "active" if activate else "inactive",
+                json.dumps(metadata_payload),
+            ),
+        )
+        return dict(cursor.fetchone() or {})
+
+
+def deactivate_account_record(connection, unique_id: str) -> bool:
+    normalized_unique_id = normalize_db_unique_id(unique_id)
+    if not normalized_unique_id:
+        return False
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE ember.accounts
+            SET status = 'inactive',
+                updated_at = now()
+            WHERE platform = 'tiktok'
+              AND lower(username) = lower(%s)
+            RETURNING id
+            """,
+            (normalized_unique_id,),
+        )
+        updated_row = cursor.fetchone()
+
+    return bool(updated_row)
+
+
+def ensure_source_id(connection, source_code: str = "tiktok") -> str:
+    normalized_source_code = str(source_code or "").strip().lower()
+    if not normalized_source_code:
+        raise ValueError("Debes enviar source_code.")
+
+    source_name = "TikTok" if normalized_source_code == "tiktok" else normalized_source_code.title()
+    source_type = "tiktok" if normalized_source_code == "tiktok" else "other"
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT id
+            FROM ember.sources
+            WHERE lower(code) = lower(%s)
+            LIMIT 1
+            """,
+            (normalized_source_code,),
+        )
+        source_row = cursor.fetchone()
+        if source_row:
+            return str(source_row["id"])
+
+        cursor.execute(
+            """
+            INSERT INTO ember.sources (code, name, source_type)
+            VALUES (%s, %s, %s)
+            RETURNING id
+            """,
+            (normalized_source_code, source_name, source_type),
+        )
+        source_row = cursor.fetchone()
+        return str(source_row["id"])
+
+
+def upsert_account_session_record(
+    connection,
+    unique_id: str,
+    session_key: str,
+    *,
+    status: str,
+    started_at: Optional[datetime] = None,
+    ended_at: Optional[datetime] = None,
+    error_message: Optional[str] = None,
+    metadata: Optional[Dict[str, object]] = None,
+    activate_account: bool = True,
+) -> Dict[str, object]:
+    normalized_unique_id = normalize_db_unique_id(unique_id)
+    if not normalized_unique_id:
+        raise ValueError("Debes enviar unique_id.")
+
+    normalized_session_key = str(session_key or "").strip()
+    if not normalized_session_key:
+        raise ValueError("Debes enviar session_id.")
+
+    account_row = ensure_account_record(
+        connection,
+        normalized_unique_id,
+        activate=activate_account,
+    )
+    if not account_row:
+        raise ValueError(f"No se pudo resolver la cuenta {normalized_unique_id}.")
+
+    normalized_status = str(status or "").strip().lower()
+    if normalized_status not in {"connecting", "live", "ended", "failed", "cancelled"}:
+        raise ValueError("Debes enviar un status de sesión válido.")
+
+    resolved_started_at = started_at or datetime.now().astimezone()
+    resolved_ended_at = ended_at
+    metadata_payload = json.dumps(to_json_safe(metadata or {}), ensure_ascii=False)
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO ember.account_sessions (
+              account_id,
+              session_key,
+              status,
+              started_at,
+              ended_at,
+              error_message,
+              metadata
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
+            ON CONFLICT (account_id, session_key) DO UPDATE SET
+              status = EXCLUDED.status,
+              started_at = LEAST(ember.account_sessions.started_at, EXCLUDED.started_at),
+              ended_at = CASE
+                WHEN EXCLUDED.status = 'live' THEN NULL
+                WHEN ember.account_sessions.ended_at IS NULL THEN EXCLUDED.ended_at
+                ELSE ember.account_sessions.ended_at
+              END,
+              error_message = COALESCE(EXCLUDED.error_message, ember.account_sessions.error_message),
+              metadata = jsonb_strip_nulls(
+                COALESCE(ember.account_sessions.metadata, '{}'::jsonb) || EXCLUDED.metadata
+              ),
+              updated_at = now()
+            RETURNING
+              id,
+              account_id,
+              session_key,
+              status,
+              started_at,
+              ended_at,
+              duration_seconds,
+              messages_count,
+              leads_detected,
+              viewers,
+              updated_at
+            """,
+            (
+                account_row["id"],
+                normalized_session_key,
+                normalized_status,
+                resolved_started_at,
+                resolved_ended_at,
+                error_message,
+                metadata_payload,
+            ),
+        )
+        session_row = cursor.fetchone()
+
+    return dict(session_row or {})
+
+
+def sync_account_session_metrics(connection, session_row_id: str) -> None:
+    normalized_session_row_id = str(session_row_id or "").strip()
+    if not normalized_session_row_id:
+        return
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT
+              count(*)::int AS messages_count,
+              count(DISTINCT username)::int AS viewers,
+              count(DISTINCT lead_id) FILTER (WHERE lead_id IS NOT NULL)::int AS leads_detected
+            FROM ember.messages
+            WHERE session_id = %s
+            """,
+            (normalized_session_row_id,),
+        )
+        metrics_row = cursor.fetchone() or {}
+        cursor.execute(
+            """
+            UPDATE ember.account_sessions
+            SET messages_count = %s,
+                viewers = %s,
+                leads_detected = %s,
+                status = 'live',
+                ended_at = NULL,
+                updated_at = now()
+            WHERE id = %s
+            """,
+            (
+                int(metrics_row.get("messages_count") or 0),
+                int(metrics_row.get("viewers") or 0),
+                int(metrics_row.get("leads_detected") or 0),
+                normalized_session_row_id,
+            ),
+        )
+
+
+def upsert_recorder_lead(
+    connection,
+    *,
+    account_id: str,
+    source_id: str,
+    username: str,
+    nickname: str,
+    total_score: int,
+    categories: List[str],
+    message_timestamp: datetime,
+    message_text: str,
+    raw_record: Dict[str, object],
+) -> Dict[str, object]:
+    normalized_username = normalize_db_unique_id(username)
+    if not normalized_username:
+        raise ValueError("Debes enviar username.")
+
+    normalized_total_score = max(0, int(total_score))
+    normalized_categories = [str(category).strip() for category in categories if str(category).strip()]
+    lead_status = "qualified" if normalized_total_score >= 7 else "new"
+    semantic_analysis = {
+        "isLead": normalized_total_score > 0,
+        "score": normalized_total_score,
+        "reasons": list(raw_record.get("lead_reasons") or []),
+        "commentNormalized": str(raw_record.get("comment_normalized", "") or ""),
+    }
+    metadata = {
+        "source": "recorder",
+        "sessionId": str(raw_record.get("session_id", "")).strip(),
+    }
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO ember.leads (
+              account_id,
+              source_id,
+              external_ref,
+              username,
+              nickname,
+              full_name,
+              status,
+              total_score,
+              categories,
+              first_seen_at,
+              last_activity_at,
+              last_message_at,
+              last_message_text,
+              semantic_analysis,
+              metadata
+            )
+            VALUES (
+              %s,
+              %s,
+              %s,
+              %s,
+              %s,
+              %s,
+              %s,
+              %s,
+              %s::text[],
+              %s,
+              %s,
+              %s,
+              %s,
+              %s::jsonb,
+              %s::jsonb
+            )
+            ON CONFLICT (account_id, lower(username)) DO UPDATE SET
+              external_ref = COALESCE(NULLIF(ember.leads.external_ref, ''), EXCLUDED.external_ref),
+              nickname = COALESCE(NULLIF(EXCLUDED.nickname, ''), ember.leads.nickname),
+              full_name = COALESCE(NULLIF(EXCLUDED.full_name, ''), ember.leads.full_name),
+              status = CASE
+                WHEN ember.leads.status IN ('contacted', 'converted', 'lost') THEN ember.leads.status
+                ELSE EXCLUDED.status
+              END,
+              total_score = ember.leads.total_score + EXCLUDED.total_score,
+              categories = (
+                SELECT ARRAY(
+                  SELECT DISTINCT category
+                  FROM unnest(
+                    COALESCE(ember.leads.categories, '{}'::text[]) ||
+                    COALESCE(EXCLUDED.categories, '{}'::text[])
+                  ) AS category
+                  WHERE category IS NOT NULL AND btrim(category) <> ''
+                )
+              ),
+              last_activity_at = EXCLUDED.last_activity_at,
+              last_message_at = EXCLUDED.last_message_at,
+              last_message_text = EXCLUDED.last_message_text,
+              semantic_analysis = jsonb_strip_nulls(
+                COALESCE(ember.leads.semantic_analysis, '{}'::jsonb) || EXCLUDED.semantic_analysis
+              ),
+              metadata = jsonb_strip_nulls(
+                COALESCE(ember.leads.metadata, '{}'::jsonb) || EXCLUDED.metadata
+              ),
+              updated_at = now()
+            RETURNING id, account_id, username
+            """,
+            (
+                account_id,
+                source_id,
+                normalized_username,
+                normalized_username,
+                str(nickname or "").strip(),
+                str(nickname or "").strip(),
+                lead_status,
+                normalized_total_score,
+                normalized_categories,
+                message_timestamp,
+                message_timestamp,
+                message_timestamp,
+                message_text,
+                json.dumps(semantic_analysis, ensure_ascii=False),
+                json.dumps(metadata, ensure_ascii=False),
+            ),
+        )
+        lead_row = cursor.fetchone()
+
+    return dict(lead_row or {})
+
+
+def insert_recorder_message(
+    connection,
+    *,
+    account_id: str,
+    session_row_id: str,
+    source_id: str,
+    lead_row_id: Optional[str],
+    username: str,
+    nickname: str,
+    content: str,
+    score: int,
+    categories: List[str],
+    occurred_at: datetime,
+    raw_record: Dict[str, object],
+) -> Dict[str, object]:
+    normalized_username = normalize_db_unique_id(username)
+    normalized_categories = [str(category).strip() for category in categories if str(category).strip()]
+    normalized_score = max(0, int(score))
+    raw_payload = to_json_safe(raw_record)
+    metadata = {
+        "source": "recorder",
+        "leadReasons": list(raw_record.get("lead_reasons") or []),
+        "commentNormalized": str(raw_record.get("comment_normalized", "") or ""),
+        "isLead": bool(raw_record.get("is_lead", False)),
+    }
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO ember.messages (
+              account_id,
+              session_id,
+              lead_id,
+              source_id,
+              external_message_id,
+              direction,
+              status,
+              username,
+              nickname,
+              content,
+              score,
+              categories,
+              occurred_at,
+              processed_at,
+              raw_payload,
+              metadata
+            )
+            VALUES (
+              %s,
+              %s,
+              %s,
+              %s,
+              %s,
+              'inbound',
+              'received',
+              %s,
+              %s,
+              %s,
+              %s,
+              %s::text[],
+              %s,
+              %s,
+              %s::jsonb,
+              %s::jsonb
+            )
+            RETURNING id
+            """,
+            (
+                account_id,
+                session_row_id,
+                lead_row_id,
+                source_id,
+                None,
+                normalized_username,
+                str(nickname or "").strip(),
+                content,
+                normalized_score,
+                normalized_categories,
+                occurred_at,
+                occurred_at,
+                json.dumps(raw_payload, ensure_ascii=False),
+                json.dumps(metadata, ensure_ascii=False),
+            ),
+        )
+        message_row = cursor.fetchone()
+
+    return dict(message_row or {})
+
+
+def sync_recorder_record_to_db(record: Dict[str, object]) -> None:
+    unique_id = normalize_db_unique_id(str(record.get("streamer_unique_id", "")))
+    session_key = str(record.get("session_id", "")).strip()
+    if not unique_id or not session_key:
+        return
+
+    message_timestamp = parse_iso_datetime(record.get("timestamp")) or datetime.now().astimezone()
+    lead_score = int(record.get("lead_score") or 0)
+    stored_message_score = max(0, lead_score)
+    lead_categories = list(record.get("lead_categories") or [])
+    author_username = normalize_db_unique_id(str(record.get("author_unique_id", "")))
+    author_nickname = str(record.get("author_nickname", "")).strip()
+    comment_text = str(record.get("comment_text", "")).strip()
+
+    with db_connection() as connection:
+        account_row = ensure_account_record(connection, unique_id, activate=False)
+        if not account_row:
+            return
+
+        session_row = upsert_account_session_record(
+            connection,
+            unique_id,
+            session_key,
+            status="live",
+            started_at=message_timestamp,
+            metadata={
+                "source": "recorder",
+                "lastMessageAt": message_timestamp.isoformat(),
+            },
+            activate_account=False,
+        )
+        source_id = ensure_source_id(connection, "tiktok")
+
+        lead_row_id: Optional[str] = None
+        if lead_score > 0:
+            lead_row = upsert_recorder_lead(
+                connection,
+                account_id=str(account_row["id"]),
+                source_id=source_id,
+                username=author_username,
+                nickname=author_nickname,
+                total_score=lead_score,
+                categories=lead_categories,
+                message_timestamp=message_timestamp,
+                message_text=comment_text,
+                raw_record=record,
+            )
+            lead_row_id = str(lead_row.get("id") or "").strip() or None
+
+        insert_recorder_message(
+            connection,
+            account_id=str(account_row["id"]),
+            session_row_id=str(session_row["id"]),
+            source_id=source_id,
+            lead_row_id=lead_row_id,
+            username=author_username,
+            nickname=author_nickname,
+            content=comment_text,
+            score=stored_message_score,
+            categories=lead_categories,
+            occurred_at=message_timestamp,
+            raw_record=record,
+        )
+        sync_account_session_metrics(connection, str(session_row["id"]))
+        connection.commit()
+
+
+def mark_recorder_session_started(unique_id: str, session_key: str) -> None:
+    normalized_unique_id = normalize_db_unique_id(unique_id)
+    normalized_session_key = str(session_key or "").strip()
+    if not normalized_unique_id or not normalized_session_key:
+        return
+
+    started_at = datetime.now().astimezone()
+
+    with db_connection() as connection:
+        upsert_account_session_record(
+            connection,
+            normalized_unique_id,
+            normalized_session_key,
+            status="live",
+            started_at=started_at,
+            metadata={
+                "source": "recorder",
+                "sessionStartedAt": started_at.isoformat(),
+            },
+            activate_account=True,
+        )
+        connection.commit()
+
+
+def mark_recorder_session_ended(unique_id: str, session_key: str, *, error_message: Optional[str] = None) -> None:
+    normalized_unique_id = normalize_db_unique_id(unique_id)
+    normalized_session_key = str(session_key or "").strip()
+    if not normalized_unique_id or not normalized_session_key:
+        return
+
+    ended_at = datetime.now().astimezone()
+
+    with db_connection() as connection:
+        upsert_account_session_record(
+            connection,
+            normalized_unique_id,
+            normalized_session_key,
+            status="ended",
+            started_at=ended_at,
+            ended_at=ended_at,
+            error_message=error_message,
+            metadata={
+                "source": "recorder",
+                "sessionEndedAt": ended_at.isoformat(),
+            },
+            activate_account=False,
+        )
+        connection.commit()
 
 
 def coerce_db_bool(value: object, default: bool = True) -> bool:
@@ -416,6 +1162,183 @@ def build_empty_control_status() -> Dict[str, object]:
     }
 
 
+def load_legacy_bridge_payload() -> Dict[str, object]:
+    if not BRIDGE_OUTPUT_PATH.exists():
+        return {}
+
+    try:
+        payload = json.loads(BRIDGE_OUTPUT_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    return payload if isinstance(payload, dict) else {}
+
+
+def coerce_snapshot_account(account: object) -> Optional[Dict[str, object]]:
+    if not isinstance(account, dict):
+        return None
+
+    unique_id = normalize_db_unique_id(str(account.get("uniqueId", "")))
+    if not unique_id:
+        return None
+
+    status = str(account.get("status", "Ended")).strip().title()
+    if status not in {"Active", "Ended"}:
+        status = "Ended"
+
+    end_time = account.get("endTime")
+    if status == "Active":
+        end_time = None
+
+    display_name = str(account.get("displayName", "")).strip() or unique_id.replace("@", "")
+    client_name = str(account.get("clientName", "")).strip()
+
+    return {
+        "uniqueId": unique_id,
+        "sessionId": str(account.get("sessionId", "")).strip(),
+        "status": status,
+        "updatedAt": account.get("updatedAt"),
+        "startTime": account.get("startTime"),
+        "endTime": end_time,
+        "messagesCount": int(account.get("messagesCount") or 0),
+        "leadsDetected": int(account.get("leadsDetected") or 0),
+        "viewers": int(account.get("viewers") or 0),
+        "campaign": normalize_db_client_key(account.get("campaign", "")),
+        "displayName": display_name,
+        "clientName": client_name,
+    }
+
+
+def coerce_snapshot_message(message: object) -> Optional[Dict[str, object]]:
+    if not isinstance(message, dict):
+        return None
+
+    message_id = str(message.get("id", "")).strip()
+    session_id = str(message.get("sessionId", "")).strip()
+    username = normalize_db_unique_id(str(message.get("username", "")))
+    if not message_id or not session_id or not username:
+        return None
+
+    categories = message.get("categories", [])
+    if not isinstance(categories, list):
+        categories = []
+
+    return {
+        "id": message_id,
+        "timestamp": message.get("timestamp"),
+        "username": username,
+        "nickname": str(message.get("nickname", "")).strip(),
+        "message": str(message.get("message", "")),
+        "score": int(message.get("score") or 0),
+        "categories": categories,
+        "sessionId": session_id,
+    }
+
+
+def coerce_snapshot_lead(lead: object) -> Optional[Dict[str, object]]:
+    if not isinstance(lead, dict):
+        return None
+
+    lead_id = str(lead.get("id", "")).strip()
+    if not lead_id:
+        return None
+
+    lead_messages = lead.get("messages", [])
+    if not isinstance(lead_messages, list):
+        lead_messages = []
+
+    categories = lead.get("categories", [])
+    if not isinstance(categories, list):
+        categories = []
+
+    semantic_analysis = lead.get("semanticAnalysis", {})
+    if not isinstance(semantic_analysis, dict):
+        semantic_analysis = {}
+
+    return {
+        "id": lead_id,
+        "accountUniqueId": normalize_db_unique_id(str(lead.get("accountUniqueId", ""))) or None,
+        "status": str(lead.get("status", "New")).strip().title(),
+        "username": normalize_db_unique_id(str(lead.get("username", ""))),
+        "nickname": str(lead.get("nickname", "")).strip(),
+        "totalScore": int(lead.get("totalScore") or 0),
+        "categories": categories,
+        "lastMessage": str(lead.get("lastMessage", "")),
+        "lastActivity": lead.get("lastActivity"),
+        "messages": [item for item in (coerce_snapshot_message(message) for message in lead_messages) if item],
+        "semanticAnalysis": semantic_analysis,
+        "assignedTo": lead.get("assignedTo") or None,
+    }
+
+
+def snapshot_account_engagement(account: Dict[str, object]) -> int:
+    return (
+        int(account.get("messagesCount") or 0)
+        + int(account.get("leadsDetected") or 0)
+        + int(account.get("viewers") or 0)
+    )
+
+
+def snapshot_account_updated_at_key(account: Dict[str, object]) -> str:
+    return str(to_json_safe(account.get("updatedAt")) or "")
+
+
+def pick_preferred_snapshot_account(
+    current: Optional[Dict[str, object]],
+    candidate: Optional[Dict[str, object]],
+) -> Optional[Dict[str, object]]:
+    if current is None:
+        return candidate
+    if candidate is None:
+        return current
+
+    current_status = str(current.get("status", "Ended")).strip()
+    candidate_status = str(candidate.get("status", "Ended")).strip()
+    if current_status != candidate_status:
+        return candidate if candidate_status == "Active" else current
+
+    current_updated_at = snapshot_account_updated_at_key(current)
+    candidate_updated_at = snapshot_account_updated_at_key(candidate)
+    if current_updated_at != candidate_updated_at:
+        return candidate if candidate_updated_at > current_updated_at else current
+
+    current_engagement = snapshot_account_engagement(current)
+    candidate_engagement = snapshot_account_engagement(candidate)
+    return candidate if candidate_engagement > current_engagement else current
+
+
+def snapshot_lead_activity_key(lead: Dict[str, object]) -> str:
+    return str(to_json_safe(lead.get("lastActivity")) or "")
+
+
+def snapshot_lead_score(lead: Dict[str, object]) -> int:
+    return int(lead.get("totalScore") or 0)
+
+
+def pick_preferred_snapshot_lead(
+    current: Optional[Dict[str, object]],
+    candidate: Optional[Dict[str, object]],
+) -> Optional[Dict[str, object]]:
+    if current is None:
+        return candidate
+    if candidate is None:
+        return current
+
+    current_activity = snapshot_lead_activity_key(current)
+    candidate_activity = snapshot_lead_activity_key(candidate)
+    if current_activity != candidate_activity:
+        return candidate if candidate_activity > current_activity else current
+
+    current_score = snapshot_lead_score(current)
+    candidate_score = snapshot_lead_score(candidate)
+    if current_score != candidate_score:
+        return candidate if candidate_score > current_score else current
+
+    current_message_count = len(current.get("messages") or [])
+    candidate_message_count = len(candidate.get("messages") or [])
+    return candidate if candidate_message_count > current_message_count else current
+
+
 def fetch_db_rows(client_code: Optional[str] = None) -> Dict[str, List[Dict[str, object]]]:
     account_filter_clause = "WHERE c.code = %s" if client_code else ""
     message_filter_clause = "AND c.code = %s" if client_code else ""
@@ -554,7 +1477,10 @@ def fetch_db_rows(client_code: Optional[str] = None) -> Dict[str, List[Dict[str,
     }
 
 
-def build_db_snapshot(auth_user: Optional[Dict[str, object]] = None) -> Dict[str, object]:
+def build_db_snapshot(
+    auth_user: Optional[Dict[str, object]] = None,
+    live_control_status: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
     scope_client_code = get_user_scope_client_code(auth_user)
     if auth_user and not is_admin_user(auth_user) and not scope_client_code:
         empty_control_status = build_empty_control_status()
@@ -604,14 +1530,6 @@ def build_db_snapshot(auth_user: Optional[Dict[str, object]] = None) -> Dict[str
         if account.get("session_id") is None:
             bridge_account["sessionId"] = ""
         bridge_accounts.append(bridge_account)
-
-    if bridge_accounts:
-        primary_account = next(
-            (item for item in bridge_accounts if item.get("status") == "Active"),
-            bridge_accounts[0],
-        )
-    else:
-        primary_account = None
 
     messages_by_lead: Dict[str, List[Dict[str, object]]] = {}
     bridge_messages: List[Dict[str, object]] = []
@@ -666,8 +1584,74 @@ def build_db_snapshot(auth_user: Optional[Dict[str, object]] = None) -> Dict[str
         )
 
     bridge_leads.sort(key=lambda item: str(item.get("lastActivity", "")), reverse=True)
-    if primary_account is None and bridge_accounts:
-        primary_account = bridge_accounts[0]
+    legacy_bridge_payload = load_legacy_bridge_payload()
+    if legacy_bridge_payload:
+        primary_legacy_account = coerce_snapshot_account(
+            legacy_bridge_payload.get("currentAccount") or legacy_bridge_payload.get("account")
+        )
+        raw_legacy_messages = legacy_bridge_payload.get("messages", [])
+        if isinstance(raw_legacy_messages, list):
+            seen_message_keys = {
+                (str(message.get("sessionId", "")).strip(), str(message.get("id", "")).strip())
+                for message in bridge_messages
+            }
+            for raw_message in raw_legacy_messages:
+                legacy_message = coerce_snapshot_message(raw_message)
+                if legacy_message is None:
+                    continue
+                message_key = (legacy_message["sessionId"], legacy_message["id"])
+                if message_key in seen_message_keys:
+                    continue
+                seen_message_keys.add(message_key)
+                bridge_messages.append(legacy_message)
+            bridge_messages.sort(key=lambda item: str(item.get("timestamp", "")), reverse=True)
+
+        raw_legacy_leads = legacy_bridge_payload.get("leads", [])
+        if isinstance(raw_legacy_leads, list):
+            default_account_unique_id = (
+                str(primary_legacy_account.get("uniqueId", "")).strip() if primary_legacy_account else ""
+            )
+            merged_lead_by_key: Dict[str, Dict[str, object]] = {}
+
+            def lead_key(item: Dict[str, object]) -> str:
+                return "|".join(
+                    [
+                        str(item.get("accountUniqueId", "")).strip(),
+                        str(item.get("username", "")).strip(),
+                    ]
+                )
+
+            for lead in bridge_leads:
+                key = lead_key(lead)
+                if not key.strip("|"):
+                    continue
+                merged_lead_by_key[key] = lead
+
+            for raw_lead in raw_legacy_leads:
+                legacy_lead = coerce_snapshot_lead(raw_lead)
+                if legacy_lead is None:
+                    continue
+                if not str(legacy_lead.get("accountUniqueId", "")).strip() and default_account_unique_id:
+                    legacy_lead["accountUniqueId"] = default_account_unique_id
+
+                key = lead_key(legacy_lead)
+                if not key.strip("|"):
+                    continue
+                merged_lead_by_key[key] = pick_preferred_snapshot_lead(
+                    merged_lead_by_key.get(key),
+                    legacy_lead,
+                ) or legacy_lead
+
+            bridge_leads = sorted(
+                merged_lead_by_key.values(),
+                key=lambda item: str(item.get("lastActivity", "")),
+                reverse=True,
+            )
+
+    primary_account = next(
+        (item for item in bridge_accounts if item.get("status") == "Active"),
+        bridge_accounts[0] if bridge_accounts else None,
+    )
 
     control_status = build_empty_control_status()
     control_status.update(
@@ -710,6 +1694,17 @@ def build_db_snapshot(auth_user: Optional[Dict[str, object]] = None) -> Dict[str
             },
         }
     )
+    if live_control_status:
+        for key in (
+            "configuredTargets",
+            "runningTargets",
+            "statuses",
+            "liveStatus",
+            "connectionErrors",
+            "monitoringSince",
+        ):
+            if key in live_control_status:
+                control_status[key] = live_control_status[key]
 
     bridge_payload = build_empty_bridge_payload()
     bridge_payload.update(
@@ -804,6 +1799,14 @@ class CurrentMessagesPublisher:
             self._messages_by_account.setdefault(account_key, [])
             self._leads_by_account.setdefault(account_key, {})
             self._viewer_sets.setdefault(account_key, set())
+            self._persist()
+
+    def reset(self) -> None:
+        with self._lock:
+            self._messages_by_account.clear()
+            self._leads_by_account.clear()
+            self._accounts.clear()
+            self._viewer_sets.clear()
             self._persist()
 
     def start_session(self, unique_id: str, session_id: str) -> None:
@@ -1088,29 +2091,168 @@ class ConsoleChatDisplay:
         while True:
             time.sleep(1)
 
+
+def load_seed_targets() -> List[Dict[str, str]]:
+    targets_path = Path(TARGETS_FILE)
+    if not targets_path.exists():
+        return []
+
+    try:
+        raw_targets = json.loads(targets_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+    if not isinstance(raw_targets, list):
+        return []
+
+    normalized_targets: List[Dict[str, str]] = []
+    for raw_target in raw_targets:
+        if not isinstance(raw_target, dict):
+            continue
+
+        unique_id = normalize_db_unique_id(str(raw_target.get("unique_id", "")))
+        if not unique_id:
+            continue
+
+        normalized_targets.append(
+            {
+                "unique_id": unique_id,
+                "active": bool(raw_target.get("active", True)),
+                "campaign": normalize_db_client_key(
+                    raw_target.get("campaign", raw_target.get("client_code", raw_target.get("client", "")))
+                ),
+                "display_name": str(
+                    raw_target.get(
+                        "display_name",
+                        raw_target.get("displayName", raw_target.get("nickname", "")),
+                    )
+                ).strip(),
+                "priority": normalize_db_account_priority(raw_target.get("priority", "")),
+            }
+        )
+
+    return normalized_targets
+
+
+def is_placeholder_display_name(display_name: str, unique_id: str) -> bool:
+    normalized_display_name = display_name.strip().lstrip("@").lower()
+    normalized_alias = unique_id.strip().lstrip("@").lower()
+    return not normalized_display_name or normalized_display_name == normalized_alias
+
+
+def merge_target_metadata(
+    db_target: Dict[str, object],
+    seed_target: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
+    unique_id = normalize_db_unique_id(str(db_target.get("username", "")))
+    seed_target = seed_target or {}
+
+    db_display_name = str(db_target.get("display_name", "")).strip()
+    seed_display_name = str(seed_target.get("display_name", "")).strip()
+    if is_placeholder_display_name(db_display_name, unique_id):
+        display_name = seed_display_name or db_display_name
+    else:
+        display_name = db_display_name
+    if not display_name:
+        display_name = unique_id.replace("@", "")
+
+    campaign = normalize_db_client_key(db_target.get("client_code", ""))
+    if not campaign:
+        campaign = normalize_db_client_key(seed_target.get("campaign", ""))
+
+    priority = normalize_db_account_priority(db_target.get("priority", ""))
+    if not priority:
+        priority = normalize_db_account_priority(seed_target.get("priority", ""))
+
+    return {
+        "unique_id": unique_id,
+        "active": True,
+        "campaign": campaign,
+        "display_name": display_name,
+        "priority": priority,
+    }
+
+
 def load_targets() -> List[Dict[str, str]]:
-    if Path(TARGETS_FILE).exists():
-        try:
-            data = json.loads(Path(TARGETS_FILE).read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"El archivo {TARGETS_FILE} no tiene JSON válido: "
-                f"línea {exc.lineno}, columna {exc.colno}."
-            ) from exc
+    seed_targets = load_seed_targets()
+    seed_target_map = {
+        target["unique_id"]: target
+        for target in seed_targets
+        if target.get("unique_id")
+    }
 
-        if not isinstance(data, list):
-            raise ValueError(f"El archivo {TARGETS_FILE} debe contener una lista de targets.")
+    with db_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                  a.username,
+                  a.display_name,
+                  a.priority,
+                  c.code AS client_code
+                FROM ember.accounts a
+                JOIN ember.clients c ON c.id = a.client_id
+                WHERE a.platform = 'tiktok'
+                  AND a.status = 'active'
+                ORDER BY c.code, lower(a.username)
+                """
+            )
+            db_targets = [dict(row) for row in cursor.fetchall()]
 
-        targets = [item for item in data if item.get("active", True)]
-        if targets:
-            return targets
+    merged_targets: List[Dict[str, str]] = []
+    seen_unique_ids = set()
 
-    if TIKTOK_UNIQUE_ID:
-        return [{"unique_id": TIKTOK_UNIQUE_ID, "active": True}]
+    for target in db_targets:
+        unique_id = normalize_db_unique_id(str(target.get("username", "")))
+        if not unique_id or unique_id in seen_unique_ids:
+            continue
 
-    raise ValueError(
-        "No hay cuentas configuradas. Define TARGETS_FILE con targets activos o TIKTOK_UNIQUE_ID."
-    )
+        merged_targets.append(merge_target_metadata(target, seed_target_map.get(unique_id)))
+        seen_unique_ids.add(unique_id)
+
+    for target in seed_targets:
+        unique_id = str(target.get("unique_id", "")).strip()
+        if not unique_id or unique_id in seen_unique_ids:
+            continue
+        if not target.get("active", True):
+            continue
+
+        merged_targets.append(
+            {
+                "unique_id": unique_id,
+                "active": True,
+                "campaign": normalize_db_client_key(target.get("campaign", "")),
+                "display_name": str(target.get("display_name", "")).strip() or unique_id.replace("@", ""),
+                "priority": normalize_db_account_priority(target.get("priority", "")),
+            }
+        )
+        seen_unique_ids.add(unique_id)
+
+    return merged_targets
+
+
+def purge_legacy_demo_accounts(connection) -> int:
+    normalized_targets = [
+        normalize_db_unique_id(target)
+        for target in LEGACY_DEMO_TARGETS
+        if normalize_db_unique_id(target)
+    ]
+    if not normalized_targets:
+        return 0
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            DELETE FROM ember.accounts
+            WHERE platform = 'tiktok'
+              AND lower(username) = ANY(%s)
+            RETURNING id
+            """,
+            (normalized_targets,),
+        )
+        deleted_rows = cursor.fetchall()
+
+    return len(deleted_rows)
 
 
 def normalize_unique_id(value: str) -> str:
@@ -1230,6 +2372,31 @@ async def fetch_live_status(unique_id: str) -> Dict[str, object]:
     client = TikTokLiveClient(unique_id=normalized.lstrip("@"))
 
     try:
+        is_live = await asyncio.wait_for(
+            client.is_live(),
+            timeout=LIVE_STATUS_TIMEOUT_SECONDS,
+        )
+    except Exception as live_error:
+        return {
+            "uniqueId": normalized,
+            "isLive": False,
+            "status": "unknown",
+            "checkedAt": checked_at,
+            "liveStartedAt": None,
+            "playbackUrl": None,
+            "error": f"{type(live_error).__name__}: {live_error}",
+        }
+
+    if not is_live:
+        return build_live_status(
+            normalized,
+            is_live=False,
+            checked_at=checked_at,
+            playback_url=None,
+            error=None,
+        )
+
+    try:
         room_info = await asyncio.wait_for(
             client.web.fetch_room_info(unique_id=normalized.lstrip("@")),
             timeout=LIVE_STATUS_TIMEOUT_SECONDS,
@@ -1244,25 +2411,9 @@ async def fetch_live_status(unique_id: str) -> Dict[str, object]:
             error=None if playback_url else "TikTok no entregó una URL HLS para este live.",
         )
     except Exception as room_info_error:
-        try:
-            is_live = await asyncio.wait_for(
-                client.is_live(),
-                timeout=LIVE_STATUS_TIMEOUT_SECONDS,
-            )
-        except Exception as live_error:
-            return {
-                "uniqueId": normalized,
-                "isLive": False,
-                "status": "unknown",
-                "checkedAt": checked_at,
-                "liveStartedAt": None,
-                "playbackUrl": None,
-                "error": f"{type(live_error).__name__}: {live_error}",
-            }
-
         return build_live_status(
             normalized,
-            is_live=bool(is_live),
+            is_live=True,
             checked_at=checked_at,
             playback_url=None,
             error=None
@@ -1296,14 +2447,41 @@ def run_target(
     def handle_record(record: Dict[str, object]) -> None:
         if display is not None:
             display.enqueue(record)
+        try:
+            sync_recorder_record_to_db(record)
+        except Exception as exc:
+            print(
+                f"No se pudo sincronizar la sesión en la DB para "
+                f"@{unique_id}: {type(exc).__name__}: {exc}"
+            )
         publisher.ingest(record)
 
     def handle_session_end() -> None:
-        rotator.upload_current()
+        if not recorder.stop_requested:
+            rotator.upload_current()
+        else:
+            print(f"Se omitió la subida a Drive para @{unique_id} porque el monitoreo fue detenido manualmente.")
         publisher.end_session(unique_id)
+        try:
+            mark_recorder_session_ended(unique_id, recorder.session_id)
+        except Exception as exc:
+            print(
+                f"No se pudo cerrar la sesión en la DB para "
+                f"@{unique_id}: {type(exc).__name__}: {exc}"
+            )
 
     recorder.message_callback = handle_record
-    recorder.session_start_callback = lambda session_id: publisher.start_session(unique_id, session_id)
+    def handle_session_start(session_id: str) -> None:
+        publisher.start_session(unique_id, session_id)
+        try:
+            mark_recorder_session_started(unique_id, session_id)
+        except Exception as exc:
+            print(
+                f"No se pudo registrar el inicio de sesión en la DB para "
+                f"@{unique_id}: {type(exc).__name__}: {exc}"
+            )
+
+    recorder.session_start_callback = handle_session_start
     recorder.session_end_callback = handle_session_end
     if recorder_ready_callback is not None:
         recorder_ready_callback(unique_id, recorder)
@@ -1312,6 +2490,13 @@ def run_target(
     except Exception as exc:
         print(f"No se pudo conectar a @{unique_id}: {exc}")
         publisher.end_session(unique_id)
+        try:
+            mark_recorder_session_ended(unique_id, recorder.session_id, error_message=str(exc))
+        except Exception as db_exc:
+            print(
+                f"No se pudo marcar la sesión como fallida en la DB para "
+                f"@{unique_id}: {type(db_exc).__name__}: {db_exc}"
+            )
     finally:
         if recorder_finished_callback is not None:
             recorder_finished_callback(unique_id, recorder)
@@ -1326,6 +2511,10 @@ class RecorderCoordinator:
         self._recorders: Dict[str, TikTokCommentRecorder] = {}
         self._live_status_lock = threading.Lock()
         self._live_status_cache: Dict[str, Tuple[float, Dict[str, object]]] = {}
+        self._listener_supervisor_stop_event = threading.Event()
+        self._listener_supervisor_thread: Optional[threading.Thread] = None
+        self._status_refresh_stop_event = threading.Event()
+        self._status_refresh_thread: Optional[threading.Thread] = None
 
     def start_target(self, unique_id: str) -> Dict[str, object]:
         normalized = normalize_unique_id(unique_id)
@@ -1375,12 +2564,63 @@ class RecorderCoordinator:
                 if existing is threading.current_thread():
                     self._threads.pop(normalized, None)
 
-    def add_target(self, unique_id: str) -> Dict[str, object]:
+    def add_target(
+        self,
+        unique_id: str,
+        *,
+        client_code: Optional[str] = None,
+        display_name: Optional[str] = None,
+        priority: Optional[str] = None,
+    ) -> Dict[str, object]:
         normalized = normalize_unique_id(unique_id)
+        normalized_client_code = normalize_db_client_key(client_code or "")
+        normalized_display_name = str(display_name or "").strip()
+        normalized_priority = (
+            normalize_db_account_priority(priority)
+            if priority is not None and str(priority).strip()
+            else None
+        )
+
+        with db_connection() as connection:
+            ensure_account_record(
+                connection,
+                normalized,
+                client_code=normalized_client_code or None,
+                display_name=normalized_display_name or None,
+                priority=normalized_priority,
+            )
+            connection.commit()
+
         targets = load_targets()
-        if not any(normalize_unique_id(str(item["unique_id"])) == normalized for item in targets):
-            targets.append({"unique_id": normalized, "active": True})
-            save_targets(targets)
+        updated = False
+        for target in targets:
+            if normalize_unique_id(str(target.get("unique_id", ""))) != normalized:
+                continue
+
+            target["active"] = True
+            if normalized_client_code:
+                target["campaign"] = normalized_client_code
+            if normalized_display_name:
+                target["display_name"] = normalized_display_name
+            if normalized_priority:
+                target["priority"] = normalized_priority
+            updated = True
+            break
+
+        if not updated:
+            target_entry: Dict[str, object] = {
+                "unique_id": normalized,
+                "active": True,
+            }
+            if normalized_client_code:
+                target_entry["campaign"] = normalized_client_code
+            if normalized_display_name:
+                target_entry["display_name"] = normalized_display_name
+            if normalized_priority:
+                target_entry["priority"] = normalized_priority
+            targets.append(target_entry)
+
+        save_targets(targets)
 
         return self.start_target(normalized)
 
@@ -1391,34 +2631,28 @@ class RecorderCoordinator:
             thread = self._threads.get(normalized)
 
         targets = load_targets()
-        filtered_targets = [
-            item
-            for item in targets
-            if normalize_unique_id(str(item.get("unique_id", ""))) != normalized
-        ]
-        target_was_configured = len(filtered_targets) != len(targets)
-        if target_was_configured:
-            save_targets(filtered_targets)
+        target_was_configured = any(
+            normalize_unique_id(str(item.get("unique_id", ""))) == normalized for item in targets
+        )
+
+        with db_connection() as connection:
+            deactivate_account_record(connection, normalized)
+            connection.commit()
 
         disconnect_requested = False
         disconnect_error: Optional[str] = None
         if recorder is not None:
-            loop = getattr(recorder.client, "_asyncio_loop", None)
-            if loop is not None and not loop.is_closed():
+            try:
                 disconnect_requested = True
-                try:
-                    future = asyncio.run_coroutine_threadsafe(
-                        recorder.client.disconnect(close_client=True),
-                        loop,
-                    )
-                    future.result(timeout=15)
-                except Exception as exc:
-                    disconnect_error = f"{type(exc).__name__}: {exc}"
-            else:
-                disconnect_error = "El cliente no tiene un loop activo."
+                recorder.request_stop()
+                recorder.request_disconnect(close_client=True, timeout=15)
+            except Exception as exc:
+                disconnect_error = f"{type(exc).__name__}: {exc}"
 
         if thread is not None and thread.is_alive():
             thread.join(timeout=15)
+
+        save_targets(load_targets())
 
         with self._lock:
             remaining_thread = self._threads.get(normalized)
@@ -1440,18 +2674,162 @@ class RecorderCoordinator:
             "error": disconnect_error,
         }
 
-    def _get_cached_live_status(self, unique_id: str) -> Dict[str, object]:
+    def _get_cached_live_status(self, unique_id: str, *, force_refresh: bool = False) -> Dict[str, object]:
         normalized = normalize_unique_id(unique_id)
         now = time.time()
         with self._live_status_lock:
             cached = self._live_status_cache.get(normalized)
-            if cached and now - cached[0] < LIVE_STATUS_CACHE_TTL_SECONDS:
+            if not force_refresh and cached and now - cached[0] < LIVE_STATUS_CACHE_TTL_SECONDS:
                 return dict(cached[1])
 
         status = fetch_live_status_sync(normalized)
         with self._live_status_lock:
             self._live_status_cache[normalized] = (now, status)
         return dict(status)
+
+    def _list_active_targets(self) -> List[str]:
+        active_targets: List[str] = []
+        seen_targets = set()
+
+        for item in load_targets():
+            if not item.get("active", True):
+                continue
+
+            raw_unique_id = str(item.get("unique_id", "")).strip()
+            if not raw_unique_id:
+                continue
+
+            try:
+                normalized = normalize_unique_id(raw_unique_id)
+            except ValueError:
+                continue
+
+            if normalized in seen_targets:
+                continue
+
+            seen_targets.add(normalized)
+            active_targets.append(normalized)
+
+        return active_targets
+
+    def _refresh_active_targets(self) -> None:
+        active_targets = self._list_active_targets()
+        if not active_targets:
+            return
+
+        print(
+            f"Validando {len(active_targets)} cuenta(s) activas en línea "
+            f"cada {LIVE_STATUS_REFRESH_INTERVAL_SECONDS // 60} minuto(s)."
+        )
+        for unique_id in active_targets:
+            try:
+                self.start_target(unique_id)
+            except Exception as exc:
+                print(f"No se pudo reanudar @{unique_id.lstrip('@')}: {type(exc).__name__}: {exc}")
+
+        max_workers = min(4, len(active_targets))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_by_unique_id = {
+                executor.submit(self._get_cached_live_status, unique_id, force_refresh=True): unique_id
+                for unique_id in active_targets
+            }
+            for future in concurrent.futures.as_completed(future_by_unique_id):
+                unique_id = future_by_unique_id[future]
+                try:
+                    future.result()
+                except Exception as exc:
+                    print(f"No se pudo validar @{unique_id.lstrip('@')}: {type(exc).__name__}: {exc}")
+
+    def _supervise_listeners(self) -> None:
+        active_targets = self._list_active_targets()
+        if not active_targets:
+            return
+
+        with self._lock:
+            running_targets = {
+                unique_id
+                for unique_id, thread in self._threads.items()
+                if thread.is_alive()
+            }
+
+        for unique_id in active_targets:
+            if unique_id in running_targets:
+                continue
+            try:
+                self.start_target(unique_id)
+                print(f"Reiniciando listener para @{unique_id.lstrip('@')}.")
+            except Exception as exc:
+                print(f"No se pudo reiniciar @{unique_id.lstrip('@')}: {type(exc).__name__}: {exc}")
+
+    def _status_refresh_loop(self) -> None:
+        refresh_interval = max(60, LIVE_STATUS_REFRESH_INTERVAL_SECONDS)
+        while not self._status_refresh_stop_event.wait(refresh_interval):
+            try:
+                self._refresh_active_targets()
+            except Exception as exc:
+                print(f"No se pudo ejecutar la validación periódica: {type(exc).__name__}: {exc}")
+
+    def _listener_supervisor_loop(self) -> None:
+        supervision_interval = LISTENER_SUPERVISION_INTERVAL_SECONDS
+        while not self._listener_supervisor_stop_event.wait(supervision_interval):
+            try:
+                self._supervise_listeners()
+            except Exception as exc:
+                print(f"No se pudo ejecutar el supervisor de listeners: {type(exc).__name__}: {exc}")
+
+    def start_listener_supervisor(self) -> None:
+        with self._lock:
+            existing = self._listener_supervisor_thread
+            if existing is not None and existing.is_alive():
+                return
+            self._listener_supervisor_stop_event.clear()
+            print(
+                f"Supervisor de listeners activado cada "
+                f"{LISTENER_SUPERVISION_INTERVAL_SECONDS} segundo(s)."
+            )
+            self._listener_supervisor_thread = threading.Thread(
+                target=self._listener_supervisor_loop,
+                name="listener-supervisor",
+                daemon=True,
+            )
+            self._listener_supervisor_thread.start()
+
+    def stop_listener_supervisor(self) -> None:
+        self._listener_supervisor_stop_event.set()
+        with self._lock:
+            thread = self._listener_supervisor_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=5)
+        with self._lock:
+            if self._listener_supervisor_thread is thread:
+                self._listener_supervisor_thread = None
+
+    def start_status_refresh_worker(self) -> None:
+        with self._lock:
+            existing = self._status_refresh_thread
+            if existing is not None and existing.is_alive():
+                return
+            self._status_refresh_stop_event.clear()
+            print(
+                f"Validación periódica de cuentas activada cada "
+                f"{LIVE_STATUS_REFRESH_INTERVAL_SECONDS // 60} minuto(s)."
+            )
+            self._status_refresh_thread = threading.Thread(
+                target=self._status_refresh_loop,
+                name="live-status-refresh",
+                daemon=True,
+            )
+            self._status_refresh_thread.start()
+
+    def stop_status_refresh_worker(self) -> None:
+        self._status_refresh_stop_event.set()
+        with self._lock:
+            thread = self._status_refresh_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=5)
+        with self._lock:
+            if self._status_refresh_thread is thread:
+                self._status_refresh_thread = None
 
     def get_live_statuses(self) -> List[Dict[str, object]]:
         with self._lock:
@@ -1484,22 +2862,16 @@ class RecorderCoordinator:
                     except Exception as exc:
                         status = {
                             "uniqueId": unique_id,
-                            "isLive": True,
-                            "status": "online",
+                            "isLive": False,
+                            "status": "unknown",
                             "checkedAt": checked_at,
                             "liveStartedAt": None,
                             "playbackUrl": None,
                             "error": f"No se pudo obtener playbackUrl: {type(exc).__name__}: {exc}",
                         }
-                    if status.get("status") != "online":
-                        status.update(
-                            {
-                                "isLive": True,
-                                "status": "online",
-                                "checkedAt": checked_at,
-                                "error": status.get("error") or "Listener conectado, pero sin URL HLS disponible.",
-                            }
-                        )
+                    else:
+                        if not status.get("checkedAt"):
+                            status["checkedAt"] = checked_at
                     statuses.append(status)
 
             statuses.sort(key=lambda item: str(item.get("uniqueId", "")))
@@ -1524,6 +2896,10 @@ class RecorderCoordinator:
                 unique_id
                 for unique_id, thread in self._threads.items()
                 if thread.is_alive()
+                and not (
+                    (recorder := self._recorders.get(unique_id)) is not None
+                    and recorder.stop_requested
+                )
             )
 
         configured = [
@@ -1625,7 +3001,8 @@ def build_control_handler(coordinator: RecorderCoordinator):
             if user is None:
                 return
 
-            snapshot = build_db_snapshot(user)
+            live_control_status = coordinator.get_status()
+            snapshot = build_db_snapshot(user, live_control_status)
             if request_path == "/live-status":
                 payload = {"ok": True, "statuses": snapshot.get("controlStatus", {}).get("liveStatus", [])}
             elif request_path == "/db-snapshot":
@@ -1788,7 +3165,12 @@ def build_control_handler(coordinator: RecorderCoordinator):
                 unique_id = str(payload.get("unique_id", "")).strip()
                 if not unique_id:
                     raise ValueError("Debes enviar unique_id.")
-                result = coordinator.add_target(unique_id)
+                result = coordinator.add_target(
+                    unique_id,
+                    client_code=payload.get("client_code", payload.get("campaign", payload.get("client", ""))),
+                    display_name=payload.get("display_name", payload.get("displayName", payload.get("nickname", ""))),
+                    priority=payload.get("priority", ""),
+                )
                 self._write_json(result)
             except Exception as exc:
                 self._write_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
@@ -2086,9 +3468,58 @@ def start_control_server(coordinator: RecorderCoordinator) -> ThreadingHTTPServe
 
 
 def main():
+    with db_connection() as connection:
+        deleted_legacy_targets = purge_legacy_demo_accounts(connection)
+        if deleted_legacy_targets > 0:
+            print(
+                f"Se limpiaron {deleted_legacy_targets} cuenta(s) demo heredadas de la base de datos."
+            )
+        connection.commit()
+
     targets = load_targets()
-    print(f"Escuchando {len(targets)} cuenta(s): {', '.join(t['unique_id'] for t in targets)}")
+    if targets:
+        print(f"Escuchando {len(targets)} cuenta(s): {', '.join(t['unique_id'] for t in targets)}")
+    else:
+        print(
+            "No hay cuentas activas en la base de datos. El recorder quedará inactivo "
+            "hasta que agregues una cuenta."
+        )
+
+    save_targets(targets)
+
     publisher = CurrentMessagesPublisher(BRIDGE_OUTPUT_PATH)
+    publisher.reset()
+
+    with db_connection() as connection:
+        did_update_accounts = False
+        for target in targets:
+            target_unique_id = str(target.get("unique_id", "")).strip()
+            if not target_unique_id:
+                continue
+
+            target_client_code = normalize_db_client_key(
+                target.get("client_code", target.get("campaign", target.get("client", "")))
+            )
+            target_display_name = str(
+                target.get("display_name", target.get("displayName", target.get("nickname", "")))
+            ).strip()
+            target_priority = str(target.get("priority", "")).strip()
+
+            if not target_client_code:
+                continue
+
+            ensure_account_record(
+                connection,
+                target_unique_id,
+                client_code=target_client_code or None,
+                display_name=target_display_name or None,
+                priority=target_priority or None,
+            )
+            did_update_accounts = True
+
+        if did_update_accounts:
+            connection.commit()
+
     for target in targets:
         publisher.ensure_account(str(target["unique_id"]))
 
@@ -2104,8 +3535,12 @@ def main():
     coordinator = RecorderCoordinator(publisher, display)
     control_server = start_control_server(coordinator)
     atexit.register(control_server.shutdown)
+    atexit.register(coordinator.stop_listener_supervisor)
+    atexit.register(coordinator.stop_status_refresh_worker)
     for target in targets:
         coordinator.start_target(str(target["unique_id"]))
+    coordinator.start_listener_supervisor()
+    coordinator.start_status_refresh_worker()
 
     display.run()
 

@@ -1,7 +1,10 @@
 # tiktok_listener.py
+import asyncio
+import concurrent.futures
 import json
 import re
 import threading
+import time
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -246,6 +249,8 @@ class TikTokCommentRecorder:
         self._session_closed = False
         self._session_started = False
         self._session_closed_lock = threading.Lock()
+        self._stop_requested = threading.Event()
+        self._event_loop: Optional[asyncio.AbstractEventLoop] = None
         self._register_events()
 
     def _register_events(self):
@@ -307,6 +312,36 @@ class TikTokCommentRecorder:
 
         if self.session_start_callback is not None:
             self.session_start_callback(self.session_id)
+
+    def request_stop(self) -> None:
+        self._stop_requested.set()
+
+    @property
+    def stop_requested(self) -> bool:
+        return self._stop_requested.is_set()
+
+    @property
+    def event_loop(self) -> Optional[asyncio.AbstractEventLoop]:
+        return self._event_loop
+
+    def request_disconnect(self, *, close_client: bool = False, timeout: float = 15.0) -> None:
+        loop = self._event_loop
+        deadline = time.monotonic() + 2.0
+        while (loop is None or loop.is_closed()) and time.monotonic() < deadline:
+            time.sleep(0.05)
+            loop = self._event_loop
+
+        if loop is None or loop.is_closed():
+            raise RuntimeError("El cliente no tiene un loop activo.")
+
+        future = asyncio.run_coroutine_threadsafe(
+            self.client.disconnect(close_client=close_client),
+            loop,
+        )
+        try:
+            future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            pass
     @staticmethod
     def _coerce_mapping(value: object) -> Dict[str, object]:
         if isinstance(value, dict):
@@ -421,7 +456,21 @@ class TikTokCommentRecorder:
         )
 
     def run(self):
-        self.client.run()
+        loop = asyncio.new_event_loop()
+        self._event_loop = loop
+        try:
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(self.client.connect())
+        finally:
+            try:
+                if self.client.connected:
+                    loop.run_until_complete(self.client.disconnect(close_client=True))
+            except Exception:
+                pass
+            finally:
+                asyncio.set_event_loop(None)
+                self._event_loop = None
+                loop.close()
 
 
 if __name__ == "__main__":

@@ -5,17 +5,17 @@ import { Input } from './ui/input';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from './ui/accordion';
 import { useRecorderBridge } from '../data/useRecorderBridge';
 import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router';
 import { AiReviewPanels } from './AiReviewPanels';
-import { TikTokPhoneLiveModal } from './tiktok/tiktok-phone-live-modal';
-import { MoreHorizontal, Play, X } from 'lucide-react';
+import { Check, MoreHorizontal, Play, X } from 'lucide-react';
 import { readJsonResponse, resolveApiErrorMessage } from '../../lib/http';
 import { resolveClientByAccount } from '../dashboard/client-users.mjs';
 import { authFetch, useAuth } from '../auth/auth';
+import { openTikTokLivePopup } from '@/lib/tiktok-live';
+import { useLocation, useNavigate } from 'react-router';
 
 const DELETED_ACCOUNTS_STORAGE_KEY = 'ember:deleted-accounts';
 const ACCOUNT_OVERRIDES_STORAGE_KEY = 'ember:account-overrides';
-const IGNORED_MONITORING_STORAGE_KEY = 'ember:ignored-monitoring-accounts';
+const ACCOUNTS_FOCUS_TARGET_STORAGE_KEY = 'ember:accounts-focus-target';
 const START_MONITORING_PROGRESS_STAGES = [
   'Validando la cuenta',
   'Conectando con TikTok',
@@ -25,6 +25,8 @@ const START_MONITORING_PROGRESS_STAGES = [
 const START_MONITORING_PROGRESS_TOTAL_MS = 3_000;
 const START_MONITORING_PROGRESS_STEP_MS =
   START_MONITORING_PROGRESS_TOTAL_MS / START_MONITORING_PROGRESS_STAGES.length;
+const START_MONITORING_DONE_VISIBLE_MS = 5_000;
+const START_MONITORING_DONE_FADE_MS = 500;
 const STOP_MONITORING_PROGRESS_TOTAL_MS = 3_000;
 const STOP_MONITORING_DONE_VISIBLE_MS = 1_000;
 const ACCOUNT_TABLE_COLUMN_WIDTHS = [
@@ -52,16 +54,6 @@ interface AccountOverride {
 }
 
 type AccountOverridesMap = Record<string, AccountOverride>;
-type LivePreviewAccount = {
-  username: string;
-  displayName: string;
-  isLive: boolean;
-  playbackUrl: string | null;
-  viewerCount: number;
-  leadCount: number;
-  messageCount: number;
-  streamStartedAt: Date | null;
-};
 
 const normalizeUniqueId = (value?: string) => {
   const trimmed = (value ?? '').trim().toLowerCase();
@@ -220,8 +212,16 @@ function LoadingSpinner({ className = '' }: { className?: string }) {
 
 export function Accounts() {
   const { user } = useAuth();
-  const { accounts, configuredTargets, runningTargets, onlineTargets, liveStatuses } = useRecorderBridge();
+  const location = useLocation();
+  const {
+    accounts,
+    configuredTargets,
+    runningTargets,
+    onlineTargets,
+    liveStatuses,
+  } = useRecorderBridge();
   const navigate = useNavigate();
+  const [focusedAccountTarget, setFocusedAccountTarget] = useState<string | null>(null);
   const [deletingAccount, setDeletingAccount] = useState<string | null>(null);
   const [monitoringActionFor, setMonitoringActionFor] = useState<string | null>(null);
   const [monitoringActionType, setMonitoringActionType] = useState<'start' | 'stop' | null>(null);
@@ -232,11 +232,17 @@ export function Accounts() {
   const [newTargetLastName, setNewTargetLastName] = useState('');
   const [openActionsFor, setOpenActionsFor] = useState<string | null>(null);
   const [editingSourceAccount, setEditingSourceAccount] = useState<string | null>(null);
-  const [livePreviewAccount, setLivePreviewAccount] = useState<LivePreviewAccount | null>(null);
+  const [openCampaigns, setOpenCampaigns] = useState<AccountCampaign[]>([
+    'WOM',
+    'CLARO',
+    'DEMO',
+    'SIN_ASIGNAR',
+  ]);
   const [startProgress, setStartProgress] = useState<{
     account: string;
     stageIndex: number;
     completed: boolean;
+    isFadingOut: boolean;
   } | null>(null);
   const [stopProgress, setStopProgress] = useState<{
     account: string;
@@ -245,6 +251,8 @@ export function Accounts() {
   } | null>(null);
   const startProgressTimersRef = useRef<number[]>([]);
   const stopProgressTimersRef = useRef<number[]>([]);
+  const accountRowRefs = useRef<Map<string, HTMLTableRowElement | null>>(new Map());
+  const lastAutoFocusedAccountRef = useRef<string | null>(null);
   const [editForm, setEditForm] = useState<{
     uniqueId: string;
     nickname: string;
@@ -288,22 +296,6 @@ export function Accounts() {
       return next;
     });
   };
-  const [ignoredMonitoringAccounts, setIgnoredMonitoringAccounts] = useState<Set<string>>(() => {
-    if (typeof window === 'undefined') {
-      return new Set<string>();
-    }
-
-    try {
-      const rawValue = window.localStorage.getItem(IGNORED_MONITORING_STORAGE_KEY);
-      if (!rawValue) {
-        return new Set<string>();
-      }
-      const parsedValue = JSON.parse(rawValue) as string[];
-      return new Set(parsedValue.map((item) => normalizeUniqueId(item)).filter(Boolean));
-    } catch {
-      return new Set<string>();
-    }
-  });
   const [accountOverrides, setAccountOverrides] = useState<AccountOverridesMap>(() => {
     if (typeof window === 'undefined') {
       return {};
@@ -342,6 +334,34 @@ export function Accounts() {
       return {};
     }
   });
+
+  useEffect(() => {
+    const stateFocusTarget = normalizeUniqueId(
+      (location.state as { focusAccount?: string } | null | undefined)?.focusAccount
+    );
+    if (stateFocusTarget) {
+      setFocusedAccountTarget(stateFocusTarget);
+      if (typeof window !== 'undefined') {
+        window.localStorage.removeItem(ACCOUNTS_FOCUS_TARGET_STORAGE_KEY);
+      }
+      return;
+    }
+
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const storedFocusTarget = window.localStorage.getItem(ACCOUNTS_FOCUS_TARGET_STORAGE_KEY);
+    if (!storedFocusTarget) {
+      return;
+    }
+
+    window.localStorage.removeItem(ACCOUNTS_FOCUS_TARGET_STORAGE_KEY);
+    const normalizedFocusTarget = normalizeUniqueId(storedFocusTarget);
+    if (normalizedFocusTarget) {
+      setFocusedAccountTarget(normalizedFocusTarget);
+    }
+  }, [location.key, location.state]);
 
   const campaignAccountCatalog = useMemo(() => {
     const catalogBySource = new Map<
@@ -470,7 +490,8 @@ export function Accounts() {
     setDeletedAccounts((previous) => {
       const next = new Set(
         Array.from(previous).filter((sourceUniqueId) =>
-          campaignCatalogSourceSet.has(sourceUniqueId)
+          campaignCatalogSourceSet.has(sourceUniqueId) ||
+          configuredTargetKeySet.has(normalizeUniqueIdKey(sourceUniqueId))
         )
       );
       return next.size === previous.size ? previous : next;
@@ -497,14 +518,6 @@ export function Accounts() {
         : Object.fromEntries(nextEntries);
     });
 
-    setIgnoredMonitoringAccounts((previous) => {
-      const next = new Set(
-        Array.from(previous).filter((sourceUniqueId) =>
-          campaignCatalogSourceSet.has(sourceUniqueId)
-        )
-      );
-      return next.size === previous.size ? previous : next;
-    });
   }, [
     campaignCatalogSourceSet,
     configuredTargetKeySet,
@@ -526,21 +539,11 @@ export function Accounts() {
     }
     return mapped;
   }, [liveStatuses]);
-  const LIVE_STATUS_FRESHNESS_MS = 90 * 1000;
+  const LIVE_STATUS_FRESHNESS_MS = 12 * 60 * 1000;
   const monitoredTargetKeySet = useMemo(
     () => new Set(runningTargetKeySet),
     [runningTargetKeySet]
   );
-  const ignoredMonitoringKeySet = useMemo(
-    () =>
-      new Set(
-        Array.from(ignoredMonitoringAccounts)
-          .map((account) => normalizeUniqueIdKey(account))
-          .filter(Boolean)
-      ),
-    [ignoredMonitoringAccounts]
-  );
-
   const visibleAccounts = useMemo(
     () => accountsWithOverrides.filter((account) => !deletedAccounts.has(account.sourceUniqueId)),
     [accountsWithOverrides, deletedAccounts]
@@ -567,9 +570,7 @@ export function Accounts() {
       const liveStatusOnline = liveStatus?.status === 'online' || liveStatus?.isLive === true;
       const isOnline =
         liveStatusOnline || candidateKeys.some((key) => onlineTargetKeySet.has(key));
-      const isIgnored = candidateKeys.some((key) => ignoredMonitoringKeySet.has(key));
-      const isMonitored =
-        !isIgnored && candidateKeys.some((key) => monitoredTargetKeySet.has(key));
+      const isMonitored = candidateKeys.some((key) => monitoredTargetKeySet.has(key));
 
       mapped.set(normalizedSource, {
         isOnline,
@@ -584,7 +585,6 @@ export function Accounts() {
     liveStatusesByKey,
     onlineTargetKeySet,
     monitoredTargetKeySet,
-    ignoredMonitoringKeySet,
   ]);
   const prioritizedVisibleAccounts = useMemo(
     () =>
@@ -616,6 +616,7 @@ export function Accounts() {
       }),
     [visibleAccounts, accountRealtimeState]
   );
+  const focusedAccountTargetKey = normalizeUniqueIdKey(focusedAccountTarget ?? '');
   const groupedAccountsByCampaign = useMemo(() => {
     const grouped: Record<AccountCampaign, (typeof prioritizedVisibleAccounts)> = {
       WOM: [],
@@ -636,6 +637,66 @@ export function Accounts() {
       { key: 'SIN_ASIGNAR' as const, label: 'Sin asignar', accounts: grouped.SIN_ASIGNAR },
     ].filter((group) => group.accounts.length > 0);
   }, [prioritizedVisibleAccounts]);
+
+  useEffect(() => {
+    if (!focusedAccountTargetKey) {
+      return;
+    }
+
+    const targetAccount = prioritizedVisibleAccounts.find((account) => {
+      const sourceKey = normalizeUniqueIdKey(account.sourceUniqueId);
+      const uniqueKey = normalizeUniqueIdKey(account.uniqueId);
+      return sourceKey === focusedAccountTargetKey || uniqueKey === focusedAccountTargetKey;
+    });
+
+    if (!targetAccount) {
+      return;
+    }
+
+    const targetCampaign = normalizeCampaign(targetAccount.campaign);
+    setOpenCampaigns((current) =>
+      current.includes(targetCampaign) ? current : [...current, targetCampaign]
+    );
+  }, [focusedAccountTargetKey, prioritizedVisibleAccounts]);
+
+  useEffect(() => {
+    if (!focusedAccountTargetKey) {
+      return;
+    }
+
+    if (lastAutoFocusedAccountRef.current === focusedAccountTargetKey) {
+      return;
+    }
+
+    const targetAccount = prioritizedVisibleAccounts.find((account) => {
+      const sourceKey = normalizeUniqueIdKey(account.sourceUniqueId);
+      const uniqueKey = normalizeUniqueIdKey(account.uniqueId);
+      return sourceKey === focusedAccountTargetKey || uniqueKey === focusedAccountTargetKey;
+    });
+
+    if (!targetAccount) {
+      return;
+    }
+
+    const rowKey = normalizeUniqueId(targetAccount.sourceUniqueId);
+    const rowElement = accountRowRefs.current.get(rowKey);
+    if (!rowElement) {
+      return;
+    }
+
+    lastAutoFocusedAccountRef.current = focusedAccountTargetKey;
+    const frameId = window.requestAnimationFrame(() => {
+      rowElement.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+        inline: 'nearest',
+      });
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+    };
+  }, [focusedAccountTargetKey, prioritizedVisibleAccounts, openCampaigns]);
   const clearStartProgressTimers = () => {
     startProgressTimersRef.current.forEach((timerId) => window.clearTimeout(timerId));
     startProgressTimersRef.current = [];
@@ -658,6 +719,7 @@ export function Accounts() {
       account,
       stageIndex: 0,
       completed: false,
+      isFadingOut: false,
     });
 
     return new Promise<void>((resolve) => {
@@ -681,8 +743,27 @@ export function Accounts() {
           if (!current || current.account !== account) {
             return current;
           }
-          return { ...current, completed: true };
+          return { ...current, completed: true, isFadingOut: false };
         });
+        const fadeTimerId = window.setTimeout(() => {
+          setStartProgress((current) => {
+            if (!current || current.account !== account) {
+              return current;
+            }
+            return { ...current, isFadingOut: true };
+          });
+        }, START_MONITORING_DONE_VISIBLE_MS - START_MONITORING_DONE_FADE_MS);
+        startProgressTimersRef.current.push(fadeTimerId);
+
+        const dismissTimerId = window.setTimeout(() => {
+          setStartProgress((current) => {
+            if (!current || current.account !== account) {
+              return current;
+            }
+            return null;
+          });
+        }, START_MONITORING_DONE_VISIBLE_MS);
+        startProgressTimersRef.current.push(dismissTimerId);
         resolve();
       }, START_MONITORING_PROGRESS_TOTAL_MS);
       startProgressTimersRef.current.push(completionTimerId);
@@ -805,13 +886,6 @@ export function Accounts() {
       return;
     }
 
-    window.localStorage.setItem(
-      IGNORED_MONITORING_STORAGE_KEY,
-      JSON.stringify(Array.from(ignoredMonitoringAccounts))
-    );
-  }, [ignoredMonitoringAccounts]);
-
-  useEffect(() => {
     const handleMouseDown = (event: MouseEvent) => {
       const target = event.target as HTMLElement | null;
       if (!target?.closest('[data-account-actions-root="true"]')) {
@@ -837,23 +911,6 @@ export function Accounts() {
       return;
     }
     navigate(`/accounts/${encodeURIComponent(accountId)}/report`);
-  };
-
-  const openLivePreview = (
-    account: (typeof visibleAccounts)[number],
-    isLive: boolean,
-    playbackUrl: string | null
-  ) => {
-    setLivePreviewAccount({
-      username: account.uniqueId,
-      displayName: account.nickname,
-      isLive,
-      playbackUrl,
-      viewerCount: account.viewers,
-      leadCount: account.leadsDetected,
-      messageCount: account.messagesCount,
-      streamStartedAt: account.startTime,
-    });
   };
 
   const openEditAccount = (account: (typeof visibleAccounts)[number]) => {
@@ -950,7 +1007,10 @@ export function Accounts() {
     }
   };
 
-  const startMonitoring = async (sourceUniqueId: string) => {
+  const startMonitoring = async (
+    sourceUniqueId: string,
+    options?: { campaign?: NewAccountCampaign; displayName?: string }
+  ) => {
     const normalizedSource = normalizeUniqueId(sourceUniqueId);
     if (!normalizedSource) {
       setActionMessage('No se pudo identificar la cuenta a agregar.');
@@ -958,11 +1018,7 @@ export function Accounts() {
     }
 
     const targetState = accountRealtimeState.get(normalizedSource);
-    if (targetState?.isMonitored) {
-      restoreDeletedAccount(normalizedSource);
-      setActionMessage(`${normalizedSource} ya está agregada.`);
-      return true;
-    }
+    const wasAlreadyMonitored = targetState?.isMonitored === true;
 
     setMonitoringActionFor(normalizedSource);
     setMonitoringActionType('start');
@@ -975,7 +1031,11 @@ export function Accounts() {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ unique_id: normalizedSource }),
+        body: JSON.stringify({
+          unique_id: normalizedSource,
+          campaign: options?.campaign,
+          display_name: options?.displayName,
+        }),
       });
 
       const payload = await readJsonResponse<{
@@ -991,18 +1051,11 @@ export function Accounts() {
 
       const startedAccount = normalizeUniqueId(payload.unique_id || normalizedSource) || normalizedSource;
       restoreDeletedAccount(startedAccount);
-      setIgnoredMonitoringAccounts((previous) => {
-        if (!previous.has(startedAccount) && !previous.has(normalizedSource)) {
-          return previous;
-        }
-        const next = new Set(previous);
-        next.delete(startedAccount);
-        next.delete(normalizedSource);
-        return next;
-      });
       setActionMessage(
         payload.started
           ? `Cuenta ${startedAccount} agregada.`
+          : wasAlreadyMonitored
+          ? `Cuenta ${startedAccount} actualizada.`
           : `${startedAccount} ya estaba agregada.`
       );
       await progressPromise;
@@ -1030,7 +1083,6 @@ export function Accounts() {
     closeStartProgress();
     setMonitoringActionFor(normalizedSource);
     setMonitoringActionType('stop');
-    setIgnoredMonitoringAccounts((previous) => new Set(previous).add(normalizedSource));
     beginStopProgress(normalizedSource);
     try {
       let response = await authFetch(`/recorder-api/targets?unique_id=${encodeURIComponent(normalizedSource)}`, {
@@ -1070,7 +1122,7 @@ export function Accounts() {
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'No se pudo conectar con el monitor local.';
-      setActionMessage(`${normalizedSource} fue ignorada en esta vista. ${message}`);
+      setActionMessage(`${normalizedSource} fue detenida en esta vista. ${message}`);
     } finally {
       setMonitoringActionFor(null);
       setMonitoringActionType(null);
@@ -1095,12 +1147,6 @@ export function Accounts() {
 
     const normalizedTarget = normalizeUniqueId(trimmedTarget);
     const catalogCampaign = campaignCatalogBySource.get(normalizedTarget);
-    if (!catalogCampaign && newTargetCampaign !== 'DEMO') {
-      setActionMessage(
-        'La cuenta no pertenece al listado oficial de campañas. Si es una cuenta DEMO, selecciona Demo.'
-      );
-      return;
-    }
     if (catalogCampaign && catalogCampaign !== newTargetCampaign) {
       setActionMessage(
         `La cuenta ${normalizedTarget} pertenece a ${getCampaignLabel(catalogCampaign)}. Ajusta el cliente.`
@@ -1128,7 +1174,10 @@ export function Accounts() {
       };
     });
 
-    const started = await startMonitoring(trimmedTarget);
+    const started = await startMonitoring(trimmedTarget, {
+      campaign: newTargetCampaign,
+      displayName: enteredNickname,
+    });
     if (started) {
       setNewTarget('');
       setNewTargetCampaign('');
@@ -1145,7 +1194,7 @@ export function Accounts() {
             Cuentas de TikTok
           </h1>
           <p className="text-sm text-gray-500 mt-1">
-            Cuentas configuradas y sus métricas guardadas por sesión
+            Cuentas configurada para monitoreo
           </p>
         </div>
         {canManageRecorder ? (
@@ -1201,16 +1250,26 @@ export function Accounts() {
         )}
       </div>
       {startProgress ? (
-        <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-3 text-emerald-700">
+        <div
+          className={`rounded-md border border-emerald-200 bg-emerald-50 px-3 py-3 text-emerald-700 transition-opacity duration-500 ease-out ${
+            startProgress.isFadingOut ? 'opacity-0' : 'opacity-100'
+          }`}
+        >
           <div className="flex items-start justify-between gap-3">
             <div className="flex items-center gap-3">
-              <LoadingSpinner className="h-4 w-4" />
+              {startProgress.completed ? (
+                <Check className="h-4 w-4" />
+              ) : (
+                <LoadingSpinner className="h-4 w-4" />
+              )}
               <div>
                 <p className="text-sm font-medium">
                   {START_MONITORING_PROGRESS_STAGES[startProgress.stageIndex]}
                 </p>
                 <p className="text-xs opacity-90">
-                  Agregando cuenta para {startProgress.account}
+                  {startProgress.completed
+                    ? `Agregada ${startProgress.account}`
+                    : `Agregando cuenta para ${startProgress.account}`}
                 </p>
               </div>
             </div>
@@ -1270,7 +1329,10 @@ export function Accounts() {
         <CardContent className="pt-6">
           <Accordion
             type="multiple"
-            defaultValue={groupedAccountsByCampaign.map((group) => group.key)}
+            value={openCampaigns}
+            onValueChange={(value) => {
+              setOpenCampaigns(Array.isArray(value) ? (value as AccountCampaign[]) : []);
+            }}
             className="w-full"
           >
             {groupedAccountsByCampaign.map((group) => (
@@ -1330,6 +1392,12 @@ export function Accounts() {
                       <tbody>
                         {group.accounts.map((account) => {
                           const normalizedSource = normalizeUniqueId(account.sourceUniqueId);
+                          const normalizedSourceKey = normalizeUniqueIdKey(account.sourceUniqueId);
+                          const normalizedDisplayKey = normalizeUniqueIdKey(account.uniqueId);
+                          const isFocusedAccount =
+                            Boolean(focusedAccountTargetKey) &&
+                            (normalizedSourceKey === focusedAccountTargetKey ||
+                              normalizedDisplayKey === focusedAccountTargetKey);
                           const realtimeState = accountRealtimeState.get(normalizedSource);
                           const liveStatus = realtimeState?.liveStatus;
                           const isOnline = realtimeState?.isOnline === true;
@@ -1342,17 +1410,26 @@ export function Accounts() {
                             deletingAccount === normalizedSource ||
                             isMonitorBlockedByOffline;
                           const monitorDisabledReason = isMonitored
-                            ? 'Ignorar esta cuenta para dejar de monitorearla.'
+                            ? 'Detener monitoreo de esta cuenta.'
                             : isMonitorBlockedByOffline
                             ? 'La cuenta debe estar Online para agregarla.'
                             : undefined;
                           return (
                             <tr
                               key={account.sourceUniqueId}
-                              className={`border-b border-gray-100 ${
-                                isOnline
-                                  ? 'bg-emerald-50/60 hover:bg-emerald-100/60'
-                                  : 'hover:bg-gray-50'
+                              ref={(element) => {
+                                if (element) {
+                                  accountRowRefs.current.set(normalizedSource, element);
+                                } else {
+                                  accountRowRefs.current.delete(normalizedSource);
+                                }
+                              }}
+                              className={`border-b border-gray-100 transition-all duration-300 ${
+                                isFocusedAccount
+                                  ? 'bg-blue-50/80 ring-2 ring-inset ring-blue-400'
+                                  : isOnline
+                                    ? 'bg-emerald-50/60 hover:bg-emerald-100/60'
+                                    : 'hover:bg-gray-50'
                               }`}
                             >
                               <td className="py-3 px-3">
@@ -1427,20 +1504,16 @@ export function Accounts() {
                                     disabled={!canOpenLive}
                                       title={
                                         !canOpenLive
-                                          ? !isMonitored
+                                        ? !isMonitored
                                           ? 'Primero debes agregar esta cuenta.'
-                                          : 'La cuenta debe estar Online para abrir Ver Live.'
+                                          : 'La cuenta debe estar Online para abrir el live en una nueva ventana.'
                                         : undefined
                                       }
                                     onClick={() => {
                                       if (!canOpenLive) {
                                         return;
                                       }
-                                      openLivePreview(
-                                        account,
-                                        isOnline,
-                                        liveStatus?.playbackUrl ?? null
-                                      );
+                                      openTikTokLivePopup(account.uniqueId);
                                     }}
                                   >
                                     Ver Live
@@ -1468,11 +1541,11 @@ export function Accounts() {
                                         }}
                                       >
                                         {isMonitorActionPending ? (
-                                          monitoringActionType === 'stop' ? 'Ignorando...' : 'Agregando...'
+                                          monitoringActionType === 'stop' ? 'Deteniendo...' : 'Agregando...'
                                         ) : isMonitored ? (
                                           <>
                                             <span className="group-hover:hidden">Monitoreado</span>
-                                            <span className="hidden group-hover:inline">Ignorar</span>
+                                            <span className="hidden group-hover:inline">Detener</span>
                                           </>
                                         ) : (
                                           'Agregar'
@@ -1557,23 +1630,6 @@ export function Accounts() {
         summaryText={aiSummaryText}
         recommendations={aiRecommendations}
         notesStorageKey="ember:accounts:reviewer-notes"
-      />
-
-      <TikTokPhoneLiveModal
-        username={livePreviewAccount?.username ?? ''}
-        displayName={livePreviewAccount?.displayName}
-        isLive={livePreviewAccount?.isLive}
-        playbackUrl={livePreviewAccount?.playbackUrl}
-        viewerCount={livePreviewAccount?.viewerCount}
-        leadCount={livePreviewAccount?.leadCount}
-        messageCount={livePreviewAccount?.messageCount}
-        streamStartedAt={livePreviewAccount?.streamStartedAt}
-        open={livePreviewAccount !== null}
-        onOpenChange={(open) => {
-          if (!open) {
-            setLivePreviewAccount(null);
-          }
-        }}
       />
 
       {editingSourceAccount ? (

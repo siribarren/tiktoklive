@@ -1287,7 +1287,7 @@ function ModernDashboard() {
       </header>
 
       <div className="sticky top-0 z-30 mb-6 rounded-lg border border-slate-200 bg-white/95 p-4 shadow-sm backdrop-blur">
-        <div className="grid gap-3 md:grid-cols-3">
+        <div className="grid gap-3 md:grid-cols-[minmax(0,12rem)_minmax(0,22rem)_minmax(0,1fr)]">
           <div>
             <label className="text-xs font-semibold uppercase text-slate-500">Cliente</label>
             <select
@@ -2400,7 +2400,7 @@ function LegacyDashboard() {
             </div>
             </div>
             <div className="grid gap-3 md:grid-cols-3">
-              <div>
+              <div className="w-full md:w-64 md:justify-self-start">
                 <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">Agente</label>
                 <select
                   value={selectedAgentLabel}

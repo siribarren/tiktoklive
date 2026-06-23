@@ -14,11 +14,20 @@ Monorepo local con dos partes:
 
 ```bash
 npm install
-docker compose up -d
 npm run dev:all
 ```
 
-Eso levanta el frontend de Vite y el recorder de Python al mismo tiempo.
+Ese comando levanta o reutiliza:
+
+- el servicio PostgreSQL local de desarrollo
+- el backend/recorder de Python
+- el frontend de Vite
+
+Las cuentas activas ahora se leen desde PostgreSQL; `tiktoklive-recorder/targets.json`
+queda solo como espejo de compatibilidad.
+
+Por defecto intenta usar el servicio Homebrew `postgresql@17` y, si hace falta,
+puedes cambiarlo con `DEV_STACK_POSTGRES_SERVICE` o `DEV_STACK_DATABASE_URL`.
 El recorder requiere Python 3.10+ y, en este proyecto, `python3.11` es la opción recomendada.
 
 ## Ejecutar frontend
@@ -40,24 +49,16 @@ python3.11 main.py
 
 ## Base de datos local
 
-```bash
-docker compose up -d
-```
-
-La primera vez que levanta, Postgres carga automaticamente:
-
-- `database/schema.sql`
-- `database/seed.sql`
-
+El comando `npm run dev:all` usa la base local en `127.0.0.1:5432`.
 Para revisar datos de ejemplo:
 
 ```bash
-psql "postgresql://ember:ember@localhost:5432/ember" -f database/example-queries.sql
+psql "postgresql://ember:ember@127.0.0.1:5432/ember" -f database/example-queries.sql
 ```
 
 Para reiniciar la base desde cero:
 
 ```bash
-docker compose down -v
-docker compose up -d
+rm -rf /private/tmp/ember-dev-stack
+npm run dev:all
 ```

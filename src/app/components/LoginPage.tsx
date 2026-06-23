@@ -79,31 +79,33 @@ export function LoginPage() {
             <div className="space-y-4">
               <h1 className="text-4xl font-semibold tracking-tight sm:text-5xl lg:text-6xl">
                 Ember
-                <span className="block max-w-xl text-[0.72rem] font-thin italic leading-5 tracking-[0.02em] text-slate-400/75 sm:text-[0.8rem]">
+                <span className="block max-w-xl text-[0.62rem] font-thin italic leading-4 tracking-[0.02em] text-white/80 sm:text-[0.68rem]">
                   "A piece of wood or coal, etc. that continues to burn after a fire has no more flames"
                   (Un trozo de madera o carbón, etc., que continúa ardiendo después de que el fuego ya no tiene llamas)
                 </span>
-                <span className="block text-sky-300">Operación de cuentas, leads y mensajes</span>
+                <span className="block text-[calc(1em-2pt)] text-sky-300">Mas Leads</span>
+                <span className="block text-[calc(1em-2pt)] text-sky-300">Mejores Conversaciones</span>
+                <span className="block text-[calc(1em-2pt)] text-sky-300">Convierte Ventas</span>
               </h1>
-              <p className="max-w-xl text-base leading-7 text-slate-300 sm:text-lg">
-                Inicia sesión para entrar al dashboard, ver las cuentas de tu cliente y trabajar
-                con una vista protegida por permisos.
+              <p className="max-w-2xl text-base leading-7 text-slate-300 sm:text-lg">
+                Plataforma centralizada para la gestión, seguimiento y conversión de oportunidades
+                generadas a través de canales digitales
               </p>
             </div>
 
             <div className="grid gap-4 sm:grid-cols-3">
               {[
                 {
-                  title: 'Administrador',
-                  text: 'Acceso total a cuentas, reglas, configuración y sesión.',
+                  title: 'Métricas',
+                  text: 'Recoge datos y genera indicadores en tiempo real para analítica y reportes.',
                 },
                 {
-                  title: 'Cliente',
-                  text: 'Visión acotada a sus cuentas, mensajes, leads y métricas.',
+                  title: 'Conversión',
+                  text: 'Captura intención de compra inmediata y gestiona la conversación.',
                 },
                 {
-                  title: 'Supervisor',
-                  text: 'Monitoreo de un solo cliente, sin ver áreas globales.',
+                  title: 'Estrategia',
+                  text: 'Toma decisiones basados en datos para aumentar las ventas.',
                 },
               ].map((item) => (
                 <div
@@ -178,7 +180,7 @@ export function LoginPage() {
                 </form>
 
                 <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-slate-300">
-                  La sesión se guarda en este navegador para mantener el acceso entre recargas.
+                  Si tienes problemas para acceder, contacta a tu supervisor.
                 </div>
               </CardContent>
             </Card>

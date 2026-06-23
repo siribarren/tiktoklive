@@ -40,7 +40,7 @@ function matchesMessageToSession(message: Message, session: LiveSession): boolea
 }
 
 export function LiveMessages() {
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { user } = useAuth();
   const { allMessages, liveSessions, runningTargets } = useRecorderBridge();
   const isAdminUser = user?.role === 'administrator';
@@ -67,6 +67,15 @@ export function LiveMessages() {
     requestedAgentAccount || ALL_AGENTS_VALUE
   );
   const onlyLeads = searchParams.get('onlyLeads') === '1';
+  const updateOnlyLeadsFilter = (enabled: boolean) => {
+    const nextSearchParams = new URLSearchParams(searchParams);
+    if (enabled) {
+      nextSearchParams.set('onlyLeads', '1');
+    } else {
+      nextSearchParams.delete('onlyLeads');
+    }
+    setSearchParams(nextSearchParams, { replace: true });
+  };
 
   useEffect(() => {
     if (!requestedSessionId) {
@@ -385,9 +394,27 @@ export function LiveMessages() {
 
       <Card>
         <CardContent className="pt-6">
-          {onlyLeads ? (
-            <div className="mb-4">
-              <Badge className="bg-blue-600">Mostrando solo leads</Badge>
+          {hasMonitoredAccounts ? (
+            <div className="mb-4 flex flex-wrap items-center gap-2">
+              <span className="text-sm text-gray-500">Filtro</span>
+              <Button
+                type="button"
+                size="sm"
+                variant={onlyLeads ? 'default' : 'outline'}
+                className={onlyLeads ? 'bg-blue-600 hover:bg-blue-700' : ''}
+                onClick={() => updateOnlyLeadsFilter(true)}
+              >
+                Mostrar solo leads
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant={!onlyLeads ? 'default' : 'outline'}
+                className={!onlyLeads ? 'bg-blue-600 hover:bg-blue-700' : ''}
+                onClick={() => updateOnlyLeadsFilter(false)}
+              >
+                Mostrar todos
+              </Button>
             </div>
           ) : null}
 
